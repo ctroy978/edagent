@@ -1,0 +1,20 @@
+[project]
+name = "edagent"
+version = "0.1.0"
+description = "Multi-agent system for educational document grading using LangGraph, Chainlit, and FastMCP"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "langgraph>=0.2.0",
+    "langchain>=0.3.0",
+    "langchain-xai>=0.2.0",
+    "langchain-openai>=0.2.0",
+    "langchain-anthropic>=0.2.0",
+    "chainlit>=1.0.0",
+    "mcp>=1.0.0",
+    "python-dotenv>=1.0.0",
+    "pydantic>=2.0.0",
+]
+
+[project.scripts]
+edagent = "edagent.main:main"

@@ -1,0 +1,160 @@
+"""File handling utilities for processing uploaded files."""
+
+import os
+import shutil
+import tempfile
+import zipfile
+from pathlib import Path
+from typing import List, Tuple
+from langchain_core.tools import tool
+
+
+@tool
+def extract_zip_to_temp(zip_path: str) -> str:
+    """Extract a ZIP file to a temporary directory.
+
+    Args:
+        zip_path: Path to the ZIP file to extract
+
+    Returns:
+        Path to the temporary directory containing extracted files
+    """
+    try:
+        # Create a temporary directory
+        temp_dir = tempfile.mkdtemp(prefix="edagent_essays_")
+
+        # Extract the ZIP
+        with zipfile.ZipFile(zip_path, "r") as zip_ref:
+            zip_ref.extractall(temp_dir)
+
+        return temp_dir
+    except Exception as e:
+        return f"Error extracting ZIP: {str(e)}"
+
+
+@tool
+def organize_pdfs_to_temp(pdf_paths: List[str]) -> str:
+    """Copy multiple PDF files to a temporary directory for batch processing.
+
+    Args:
+        pdf_paths: List of paths to PDF files
+
+    Returns:
+        Path to the temporary directory containing organized PDFs
+    """
+    try:
+        # Create a temporary directory
+        temp_dir = tempfile.mkdtemp(prefix="edagent_essays_")
+
+        # Copy PDFs to temp directory
+        for pdf_path in pdf_paths:
+            if os.path.exists(pdf_path) and pdf_path.lower().endswith(".pdf"):
+                dest = os.path.join(temp_dir, os.path.basename(pdf_path))
+                shutil.copy2(pdf_path, dest)
+
+        return temp_dir
+    except Exception as e:
+        return f"Error organizing PDFs: {str(e)}"
+
+
+@tool
+def read_text_file(file_path: str) -> str:
+    """Read contents of a text file (rubrics, prompts, etc.).
+
+    Args:
+        file_path: Path to the text file
+
+    Returns:
+        Contents of the file as a string
+    """
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception as e:
+        return f"Error reading file: {str(e)}"
+
+
+@tool
+def list_directory_files(directory_path: str, extension: str = ".pdf") -> str:
+    """List files in a directory with a specific extension.
+
+    Args:
+        directory_path: Path to the directory
+        extension: File extension to filter (default: .pdf)
+
+    Returns:
+        Formatted list of files found
+    """
+    try:
+        path = Path(directory_path)
+        if not path.exists():
+            return f"Directory not found: {directory_path}"
+
+        files = list(path.glob(f"*{extension}"))
+        if not files:
+            return f"No {extension} files found in {directory_path}"
+
+        file_list = "\n".join([f"- {f.name}" for f in files])
+        return f"Found {len(files)} {extension} files:\n{file_list}"
+    except Exception as e:
+        return f"Error listing directory: {str(e)}"
+
+
+def parse_attached_files(message_content: str) -> Tuple[List[str], str]:
+    """Parse attached file paths from Chainlit message content.
+
+    Args:
+        message_content: The message content that may contain file attachments
+
+    Returns:
+        Tuple of (list of file paths, cleaned message without file annotations)
+    """
+    # Look for "[User attached files: ...]" pattern
+    if "[User attached files:" not in message_content:
+        return [], message_content
+
+    # Extract the file paths section
+    start = message_content.find("[User attached files:")
+    end = message_content.find("]", start)
+
+    if start == -1 or end == -1:
+        return [], message_content
+
+    files_section = message_content[start : end + 1]
+    files_str = (
+        files_section.replace("[User attached files:", "").replace("]", "").strip()
+    )
+
+    # Split by comma and clean up paths
+    file_paths = [p.strip() for p in files_str.split(",")]
+
+    # Remove the files annotation from message
+    cleaned_message = message_content[:start] + message_content[end + 1 :]
+    cleaned_message = cleaned_message.strip()
+
+    return file_paths, cleaned_message
+
+
+def categorize_uploaded_files(file_paths: List[str]) -> dict:
+    """Categorize uploaded files by type.
+
+    Args:
+        file_paths: List of file paths
+
+    Returns:
+        Dictionary with categorized files: {pdfs: [...], zips: [...], texts: [...], other: [...]}
+    """
+    categorized = {"pdfs": [], "zips": [], "texts": [], "other": []}
+
+    for path in file_paths:
+        path_lower = path.lower()
+        if path_lower.endswith(".pdf"):
+            categorized["pdfs"].append(path)
+        elif path_lower.endswith(".zip"):
+            categorized["zips"].append(path)
+        elif path_lower.endswith((".txt", ".md", ".rtf")):
+            categorized["texts"].append(path)
+        else:
+            categorized["other"].append(path)
+
+    return categorized
