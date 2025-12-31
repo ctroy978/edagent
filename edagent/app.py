@@ -149,16 +149,63 @@ async def on_message(message: cl.Message):
                 final_state = output[node_name]
 
             # Extract final response
+            elements = []
             if final_state and final_state.get("messages"):
                 final_message = final_state["messages"][-1]
                 response_content = final_message.content
                 step.output = "✓ Complete"
+
+                # Detect file paths in response to create download buttons
+                import re
+                from pathlib import Path
+
+                # Enhanced pattern to match file paths with common extensions
+                # Matches: /absolute/path/file.ext, data/relative/file.ext, C:\windows\path\file.ext
+                path_patterns = [
+                    r'(?:/[\w\-./]+/[\w\-]+\.(?:csv|zip|pdf))',  # Absolute Unix paths
+                    r'(?:data/[\w\-./]+\.(?:csv|zip|pdf))',      # Relative paths starting with data/
+                    r'(?:[A-Za-z]:[\\\/][\w\-\\\/]+\.(?:csv|zip|pdf))',  # Windows paths
+                ]
+
+                found_paths = []
+                for pattern in path_patterns:
+                    found_paths.extend(re.findall(pattern, response_content))
+
+                seen_paths = set()
+                for file_path in found_paths:
+                    # Clean up path (remove trailing punctuation)
+                    file_path = file_path.rstrip(".,;:)").strip()
+
+                    # Convert to absolute path if relative
+                    path_obj = Path(file_path)
+                    if not path_obj.is_absolute():
+                        # Resolve relative to current working directory
+                        path_obj = Path.cwd() / path_obj
+
+                    file_path_abs = str(path_obj)
+
+                    # Deduplicate and check existence
+                    if file_path_abs not in seen_paths and path_obj.exists():
+                        seen_paths.add(file_path_abs)
+                        try:
+                            elements.append(
+                                cl.File(
+                                    name=path_obj.name,
+                                    path=file_path_abs,
+                                    display="inline"
+                                )
+                            )
+                            print(f"✓ Attached file for download: {path_obj.name}")
+                        except Exception as e:
+                            print(f"✗ Error attaching file {file_path_abs}: {e}")
+                    elif file_path_abs not in seen_paths:
+                        print(f"⚠ File not found: {file_path_abs}")
             else:
                 response_content = "I apologize, but I encountered an issue processing your request. Please try again."
                 step.output = "✗ Error"
 
         # Send final response
-        await cl.Message(content=response_content).send()
+        await cl.Message(content=response_content, elements=elements).send()
 
     except Exception as e:
         error_message = f"I encountered an error: {str(e)}\n\nPlease make sure:\n1. Your .env file is configured correctly\n2. The MCP server path is valid\n3. You have the necessary API keys set"

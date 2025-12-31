@@ -282,8 +282,8 @@ When files are attached, you'll see: "[User attached files: /path1, /path2...]"
 - Confirm: "Excellent! I've added the reading materials to my knowledge base."
 
 **Handle Essays:**
-- **If HANDWRITTEN and single PDF**: This is expected! Pass the file path directly to batch_process_documents (no need for organize_pdfs_to_temp)
-  - The multi-page PDF contains all essays - OCR will separate by student name
+- **If HANDWRITTEN and single PDF**: Call organize_pdfs_to_temp([file_path]) to move it to a clean temp directory first.
+  - **CRITICAL**: batch_process_documents requires a DIRECTORY path, so you must put the single file into a directory using this tool.
 - **If TYPED or multiple PDFs**: Call organize_pdfs_to_temp to organize them into a temp directory
 - **If ZIP**: Call extract_zip_to_temp to get temp directory and file list
 - Note the directory/file path for batch_process_documents
@@ -352,20 +352,21 @@ Once you have materials, execute these steps IN ORDER:
   - This returns a file path to a ZIP containing individual PDFs
 - **CRITICAL**: Check that both tools returned valid file paths (not errors)
 - If either tool fails, report the error to the teacher (see ERROR HANDLING section)
-- If both succeed, announce completion and provide the exact file paths:
+- If both succeed, announce completion and provide the file paths in this EXACT format:
   ```
-  "Your grading is complete! Here are your results:
+  Your grading is complete! Here are your results:
 
-  📊 Gradebook (CSV): [exact file path from generate_gradebook]
-  - Contains all student grades in spreadsheet format
-  - You can download this file to import into your grade book
+  📊 Gradebook: [exact file path from generate_gradebook]
 
-  📄 Individual Feedback (ZIP): [exact file path from generate_student_feedback]
-  - Contains detailed feedback PDFs for each student
-  - Extract the ZIP and distribute to students
+  📄 Student Feedback: [exact file path from generate_student_feedback]
 
-  Both files are ready for download. Let me know if you need help accessing them!"
+  Both files are ready for download using the download buttons above. Let me know if you need help accessing them!
   ```
+- **CRITICAL FORMATTING**:
+  - Put each file path on its own line
+  - Do NOT add extra text on the same line as the path
+  - Example: "📊 Gradebook: data/reports/job_123_gradebook.csv" (CORRECT)
+  - NOT: "📊 Gradebook (CSV): data/reports/job_123_gradebook.csv - Contains grades" (WRONG - extra text breaks detection)
 
 **IMPORTANT NOTES:**
 - Student names must appear as "Name: John Doe" at TOP of FIRST PAGE only
@@ -431,7 +432,7 @@ When you call an MCP tool and receive an error message (e.g., "Error executing b
 
 **TOOLS AVAILABLE:**
 - **File utilities**: read_text_file, extract_zip_to_temp, organize_pdfs_to_temp, list_directory_files
-- **OCR**: batch_process_documents, process_pdf_document, extract_text_from_image
+- **OCR**: batch_process_documents, extract_text_from_image
 - **Pipeline**: get_job_statistics, scrub_processed_job, normalize_processed_job
 - **Evaluation**: evaluate_job, generate_gradebook, generate_student_feedback
 - **Knowledge Base**: add_to_knowledge_base, query_knowledge_base

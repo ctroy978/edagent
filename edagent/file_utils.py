@@ -27,6 +27,25 @@ def extract_zip_to_temp(zip_path: str) -> str:
         with zipfile.ZipFile(zip_path, "r") as zip_ref:
             zip_ref.extractall(temp_dir)
 
+        # Flatten directory structure: Move all files to root temp_dir
+        for root, dirs, files in os.walk(temp_dir):
+            if root == temp_dir:
+                continue  # Skip root directory
+
+            for file in files:
+                if not file.startswith('.') and not file.startswith('__MACOSX'):
+                    src_path = os.path.join(root, file)
+                    dst_path = os.path.join(temp_dir, file)
+
+                    # Handle filename collisions
+                    counter = 1
+                    base, ext = os.path.splitext(file)
+                    while os.path.exists(dst_path):
+                        dst_path = os.path.join(temp_dir, f"{base}_{counter}{ext}")
+                        counter += 1
+
+                    shutil.move(src_path, dst_path)
+
         # List all extracted files
         extracted_files = []
         for root, dirs, files in os.walk(temp_dir):

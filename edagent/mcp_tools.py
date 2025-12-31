@@ -162,7 +162,6 @@ async def get_grading_tools() -> List[StructuredTool]:
     # Include ALL tools needed for complete grading pipeline
     grading_keywords = [
         "batch_process",
-        "process_pdf",
         "extract_text",
         "get_job_statistics",
         "scrub_processed_job",
