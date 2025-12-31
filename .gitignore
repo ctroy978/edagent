@@ -27,7 +27,23 @@ ENV/
 *.db-journal
 
 # Data directories (contain student essays and PII!)
-data/
+# Ignore everything in data by default...
+data/*
+# ...but allow specific subdirectories...
+!data/exports/
+!data/reports/
+!data/vector_store/
+!data/jobs/
+# ...and allow .keep files so we can track the structure...
+!data/**/.keep
+
+# ...but ignore actual content in those subdirectories
+data/exports/*
+data/reports/*
+data/vector_store/*
+data/jobs/*
+
+# Other temp dirs
 uploads/
 temp/
 tmp/

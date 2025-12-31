@@ -11,13 +11,13 @@ from langchain_core.tools import tool
 
 @tool
 def extract_zip_to_temp(zip_path: str) -> str:
-    """Extract a ZIP file to a temporary directory.
+    """Extract a ZIP file to a temporary directory and report contents.
 
     Args:
         zip_path: Path to the ZIP file to extract
 
     Returns:
-        Path to the temporary directory containing extracted files
+        Detailed report of extraction including directory path and file list
     """
     try:
         # Create a temporary directory
@@ -27,7 +27,45 @@ def extract_zip_to_temp(zip_path: str) -> str:
         with zipfile.ZipFile(zip_path, "r") as zip_ref:
             zip_ref.extractall(temp_dir)
 
-        return temp_dir
+        # List all extracted files
+        extracted_files = []
+        for root, dirs, files in os.walk(temp_dir):
+            for file in files:
+                # Skip hidden files and system files
+                if not file.startswith('.') and not file.startswith('__MACOSX'):
+                    file_path = os.path.join(root, file)
+                    file_ext = os.path.splitext(file)[1].lower()
+                    extracted_files.append(f"{file} ({file_ext})")
+
+        # Categorize files
+        pdfs = [f for f in extracted_files if '.pdf' in f.lower()]
+        texts = [f for f in extracted_files if any(ext in f.lower() for ext in ['.txt', '.md', '.doc'])]
+        other = [f for f in extracted_files if f not in pdfs and f not in texts]
+
+        # Create detailed report
+        report = f"✓ ZIP extracted successfully to: {temp_dir}\n\n"
+        report += f"Found {len(extracted_files)} files:\n"
+
+        if pdfs:
+            report += f"\nPDF files ({len(pdfs)}):\n"
+            for pdf in pdfs:
+                report += f"  - {pdf}\n"
+
+        if texts:
+            report += f"\nText files ({len(texts)}):\n"
+            for txt in texts:
+                report += f"  - {txt}\n"
+
+        if other:
+            report += f"\nOther files ({len(other)}):\n"
+            for oth in other:
+                report += f"  - {oth}\n"
+
+        if not extracted_files:
+            report += "\n⚠️ Warning: No files found in ZIP (might be empty or corrupted)"
+
+        return report
+
     except Exception as e:
         return f"Error extracting ZIP: {str(e)}"
 

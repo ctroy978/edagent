@@ -106,12 +106,26 @@ async def get_mcp_tools() -> List[StructuredTool]:
 
             # Convert input schema to Pydantic model
             input_schema = tool_info.inputSchema
+
+            # SPECIAL HANDLING: batch_process_documents
+            # Make dpi optional in the schema so the agent doesn't worry about it
+            # We will inject the default value in the execution wrapper
+            if tool_name == "batch_process_documents":
+                if "required" in input_schema and "dpi" in input_schema["required"]:
+                    input_schema["required"].remove("dpi")
+
             args_schema = _json_schema_to_pydantic(f"{tool_name}_input", input_schema)
 
             # Create async wrapper function for tool execution
             async def make_tool_func(name: str):
                 async def tool_func(**kwargs) -> str:
                     """Execute MCP tool and return result."""
+                    
+                    # Inject default DPI for batch processing if not provided or explicitly None
+                    if name == "batch_process_documents":
+                        if "dpi" not in kwargs or kwargs["dpi"] is None:
+                            kwargs["dpi"] = 300
+
                     async with get_mcp_session() as sess:
                         result = await sess.call_tool(name, arguments=kwargs)
 

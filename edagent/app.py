@@ -86,10 +86,6 @@ async def on_message(message: cl.Message):
     Args:
         message: The user's message
     """
-    # Create a thinking message to show activity
-    thinking_msg = cl.Message(content="")
-    await thinking_msg.send()
-
     try:
         # Get or create a unique thread_id for this user session
         thread_id = cl.user_session.get("thread_id")
@@ -124,29 +120,48 @@ async def on_message(message: cl.Message):
         # Config with thread_id for memory persistence
         config = {"configurable": {"thread_id": thread_id}}
 
-        # Stream through the graph with memory
-        final_state = None
-        async for output in graph.astream(initial_state, config):
-            # Update thinking message with progress
-            node_name = list(output.keys())[0]
-            await thinking_msg.update()
+        # Create a step to show processing activity
+        async with cl.Step(name="Processing", type="run") as step:
+            step.input = message_content
 
-            final_state = output[node_name]
+            # Stream through the graph with memory
+            final_state = None
+            current_node = None
 
-        # Extract final response
-        if final_state and final_state.get("messages"):
-            final_message = final_state["messages"][-1]
-            response_content = final_message.content
-        else:
-            response_content = "I apologize, but I encountered an issue processing your request. Please try again."
+            # Node display names for better UX
+            node_names = {
+                "router": "🔍 Understanding your request",
+                "essay_grading": "📝 Processing essay grading request",
+                "test_grading": "📋 Processing test grading request",
+                "general": "💬 Preparing response",
+            }
 
-        # Send final response - remove the thinking message and send a new one
-        await thinking_msg.remove()
+            async for output in graph.astream(initial_state, config):
+                # Update step with current node
+                node_name = list(output.keys())[0]
+
+                if node_name != current_node:
+                    current_node = node_name
+                    display_name = node_names.get(node_name, f"Processing {node_name}")
+                    step.name = display_name
+                    await step.update()
+
+                final_state = output[node_name]
+
+            # Extract final response
+            if final_state and final_state.get("messages"):
+                final_message = final_state["messages"][-1]
+                response_content = final_message.content
+                step.output = "✓ Complete"
+            else:
+                response_content = "I apologize, but I encountered an issue processing your request. Please try again."
+                step.output = "✗ Error"
+
+        # Send final response
         await cl.Message(content=response_content).send()
 
     except Exception as e:
         error_message = f"I encountered an error: {str(e)}\n\nPlease make sure:\n1. Your .env file is configured correctly\n2. The MCP server path is valid\n3. You have the necessary API keys set"
-        await thinking_msg.remove()
         await cl.Message(content=error_message).send()
 
 
