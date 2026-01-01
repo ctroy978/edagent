@@ -4,9 +4,157 @@ import os
 import shutil
 import tempfile
 import zipfile
+import json
 from pathlib import Path
 from typing import List, Tuple
 from langchain_core.tools import tool
+
+# Import conversion libraries
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
+
+try:
+    from docx import Document
+except ImportError:
+    Document = None
+
+try:
+    from fpdf import FPDF
+except ImportError:
+    FPDF = None
+
+
+@tool
+def prepare_files_for_grading(file_paths: List[str]) -> str:
+    """Process and convert uploaded files into a clean directory of PDFs for grading.
+
+    Handles:
+    - PDF: Copies directly
+    - ZIP: Extracts and flattens
+    - Images (JPG, PNG, etc.): Converts to PDF
+    - Word (DOCX): Converts text to PDF
+    - Google Docs: Rejects with instruction
+
+    Args:
+        file_paths: List of paths to uploaded files (can be mixed types)
+
+    Returns:
+        JSON-formatted string containing:
+        - directory_path: Path to temp dir with ready PDFs
+        - file_count: Number of PDFs ready
+        - warnings: List of issues/rejected files
+    """
+    try:
+        # Create a temporary directory
+        temp_dir = tempfile.mkdtemp(prefix="edagent_grading_")
+        
+        warnings = []
+        processed_count = 0
+
+        # Helper to process a single file (extracted or uploaded)
+        def process_single_file(src_path, dest_dir):
+            nonlocal processed_count
+            filename = os.path.basename(src_path)
+            name, ext = os.path.splitext(filename)
+            ext = ext.lower()
+
+            # Handle PDF
+            if ext == '.pdf':
+                shutil.copy2(src_path, os.path.join(dest_dir, filename))
+                processed_count += 1
+                return
+
+            # Handle Google Docs shortcuts
+            if ext in ['.gdoc', '.gsheet', '.gslides']:
+                warnings.append(f"Rejected Google Doc shortcut: {filename}. Please export as PDF from Google Drive.")
+                return
+
+            # Handle Images
+            if ext in ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif']:
+                if Image:
+                    try:
+                        img_path = os.path.join(dest_dir, f"{name}.pdf")
+                        image = Image.open(src_path)
+                        if image.mode != 'RGB':
+                            image = image.convert('RGB')
+                        image.save(img_path)
+                        processed_count += 1
+                    except Exception as e:
+                        warnings.append(f"Failed to convert image {filename}: {str(e)}")
+                else:
+                    warnings.append(f"Cannot convert {filename}: Pillow library not available.")
+                return
+
+            # Handle Word Docs
+            if ext == '.docx':
+                if Document and FPDF:
+                    try:
+                        doc = Document(src_path)
+                        pdf = FPDF()
+                        pdf.add_page()
+                        pdf.set_font("Arial", size=12)
+                        
+                        # Extract text and write to PDF
+                        # Note: This is a basic text extraction, not full formatting preservation
+                        for para in doc.paragraphs:
+                            # Sanitize text for FPDF (latin-1 issue)
+                            text = para.text.encode('latin-1', 'replace').decode('latin-1')
+                            pdf.multi_cell(0, 10, txt=text)
+                            pdf.ln(2)
+                            
+                        pdf_path = os.path.join(dest_dir, f"{name}.pdf")
+                        pdf.output(pdf_path)
+                        processed_count += 1
+                    except Exception as e:
+                        warnings.append(f"Failed to convert Word doc {filename}: {str(e)}")
+                else:
+                    warnings.append(f"Cannot convert {filename}: python-docx or fpdf library not available.")
+                return
+
+            # Unknown type
+            if not filename.startswith('.') and not filename.startswith('__MACOSX'):
+                warnings.append(f"Skipped unsupported file type: {filename}")
+
+
+        # Iterate through uploaded files
+        for file_path in file_paths:
+            if not os.path.exists(file_path):
+                warnings.append(f"File not found: {file_path}")
+                continue
+
+            # Handle ZIPs
+            if file_path.lower().endswith('.zip'):
+                try:
+                    with tempfile.TemporaryDirectory() as zip_temp:
+                        with zipfile.ZipFile(file_path, "r") as zip_ref:
+                            zip_ref.extractall(zip_temp)
+                        
+                        # Walk and process everything in ZIP
+                        for root, dirs, files in os.walk(zip_temp):
+                            for file in files:
+                                if not file.startswith('.') and not file.startswith('__MACOSX'):
+                                    src = os.path.join(root, file)
+                                    process_single_file(src, temp_dir)
+                except Exception as e:
+                    warnings.append(f"Failed to process ZIP {os.path.basename(file_path)}: {str(e)}")
+            
+            # Handle Single Files
+            else:
+                process_single_file(file_path, temp_dir)
+
+        result = {
+            "directory_path": temp_dir,
+            "file_count": processed_count,
+            "warnings": warnings,
+            "status": "success" if processed_count > 0 else "error"
+        }
+        
+        return json.dumps(result, indent=2)
+
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
 
 
 @tool

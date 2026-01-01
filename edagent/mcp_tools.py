@@ -173,6 +173,11 @@ async def get_grading_tools() -> List[StructuredTool]:
         "query_knowledge_base",
         "search_past_jobs",
         "export_job_archive",
+        "convert_pdf_to_text",
+        "convert_word_to_pdf",
+        "convert_image_to_pdf",
+        "batch_convert",
+        "merge_images",
     ]
     return [
         tool
