@@ -159,7 +159,7 @@ async def get_grading_tools() -> List[StructuredTool]:
         Filtered list of grading-related tools including the full pipeline
     """
     all_tools = await get_mcp_tools()
-    # Include ALL tools needed for complete grading pipeline
+    # Include ALL tools needed for complete grading pipeline (excluding email tools)
     grading_keywords = [
         "batch_process",
         "extract_text",
@@ -174,7 +174,6 @@ async def get_grading_tools() -> List[StructuredTool]:
         "search_past_jobs",
         "export_job_archive",
         "convert_pdf_to_text",
-        "convert_word_to_pdf",
         "convert_image_to_pdf",
         "batch_convert",
         "merge_images",
@@ -183,4 +182,26 @@ async def get_grading_tools() -> List[StructuredTool]:
         tool
         for tool in all_tools
         if any(keyword in tool.name.lower() for keyword in grading_keywords)
+    ]
+
+
+async def get_email_tools() -> List[StructuredTool]:
+    """Get tools relevant to email distribution.
+
+    Returns:
+        Filtered list of email-related tools
+    """
+    all_tools = await get_mcp_tools()
+    # Email distribution tools only
+    email_keywords = [
+        "identify_email_problems",
+        "verify_student_name_correction",
+        "apply_student_name_correction",
+        "skip_student_email",
+        "send_student_feedback_emails",
+    ]
+    return [
+        tool
+        for tool in all_tools
+        if any(keyword in tool.name.lower() for keyword in email_keywords)
     ]

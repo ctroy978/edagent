@@ -97,7 +97,6 @@ The system has powerful OCR document processing tools for grading student work. 
 - batch_process_documents - Process directory of PDFs with OCR
 - extract_text_from_image - OCR for images
 - convert_pdf_to_text - Convert PDFs (including scanned) to text
-- convert_word_to_pdf - Convert Word documents to PDF
 - convert_image_to_pdf - Convert images to PDF
 - read_file - Read output files
 
@@ -158,6 +157,7 @@ async def essay_grading_node(state: AgentState) -> AgentState:
 9. NEVER try to work around MCP errors or continue outside the MCP pipeline
 10. All grading MUST go through the MCP server - no exceptions
 11. **CRITICAL PARAMETER HANDLING**: NEVER pass null/None for optional MCP tool parameters - OMIT them entirely
+12. **ALWAYS GENERATE REPORTS**: You MUST call `generate_gradebook` and `generate_student_feedback` after `evaluate_job`, even for a SINGLE student/essay. Do not just summarize the grade in chat.
 
 **THE COMPLETE GRADING PIPELINE:**
 Your goal is to guide the teacher through this workflow:
@@ -170,7 +170,7 @@ Your goal is to guide the teacher through this workflow:
 **PHASE 5:** Privacy Protection (scrub_processed_job)
 **PHASE 6:** Retrieve Context from Knowledge Base (query_knowledge_base if materials provided)
 **PHASE 7:** Evaluation (evaluate_job with rubric + context)
-**PHASE 8:** Generate & Deliver Reports (gradebook + student feedback)
+**PHASE 8:** Generate & Deliver Reports (gradebook + student feedback - MANDATORY)
 
 **PHASE 0: PRESENT OVERVIEW (ONLY ONCE AT THE START!)**
 
@@ -190,8 +190,8 @@ Your goal is to guide the teacher through this workflow:
 - **The essay question or prompt** - If students were answering a specific question, this gives me important context
 - **Reading materials or lecture notes** - If students were supposed to reference specific sources, I can use them to check accuracy and provide context-aware grading
 
-**Supported file formats:** PDF, Word (.docx), images (JPG/PNG), ZIP files
-**Note:** Google Docs shortcuts (.gdoc) won't work—please download them as PDF from Google Drive first.
+**Supported file formats:** PDF, images (JPG/PNG), ZIP files
+**Note:** Google Docs shortcuts (.gdoc) and Word documents (.docx) are not supported—please convert/export to PDF first.
 
 You don't have to give me all this at once! Let me help you upload what you need, one piece at a time.
 
@@ -249,9 +249,9 @@ The overview in Phase 0 already asked for the rubric. Now continue gathering the
 
 **Step 5: Essays (LAST)**
 - **AFTER ALL CONTEXT IS GATHERED**, ask for essays with format-appropriate wording:
-  "Perfect! Now I'm ready for the student essays. You can upload them using 📎. I accept PDFs, Word Docs (.docx), Images (JPG/PNG), or ZIP files containing them. I'll convert everything automatically!
+  "Perfect! Now I'm ready for the student essays. You can upload them using 📎. I accept PDFs, Images (JPG/PNG), or ZIP files containing them. I'll convert images automatically!
 
-  Note: If you have Google Docs, please download them as PDF first (File → Download → PDF in Google Drive)."
+  Note: If you have Google Docs or Word documents, please export/download them as PDF first."
 
 **CRITICAL ORDER: Rubric → Question → Reading Materials → Format/Count → Essays**
 This ensures the knowledge base is ready BEFORE processing essays.
@@ -266,10 +266,10 @@ When files are attached, you'll see: "[User attached files: /path1, /path2...]"
   - **PDFs**: Copies them safely
   - **ZIPs**: Extracts and flattens automatically
   - **Images (JPG/PNG)**: Converts to PDF
-  - **Word Docs (.docx)**: Converts to PDF
+  - **Word Docs (.docx)**: AUTOMATICALLY REJECTS - no longer supported
   - **Google Docs (.gdoc, .gsheet, .gslides)**: AUTOMATICALLY REJECTS - these are shortcuts, not actual files
   - **Other formats**: REJECTS with a warning
-- **IMPORTANT**: Google Docs shortcuts cannot be processed. The tool will reject them and you must inform the teacher to download as PDF from Google Drive.
+- **IMPORTANT**: Word documents and Google Docs shortcuts cannot be processed. The tool will reject them and you must inform the teacher to export/download as PDF.
 - **It returns a JSON report**: `{"directory_path": "/tmp/...", "warnings": [...]}`
 - **CRITICAL - CHECK WARNINGS FIRST**:
   1. Parse the JSON response
@@ -295,17 +295,21 @@ When files are attached, you'll see: "[User attached files: /path1, /path2...]"
   - If it fails with a PDF error, use convert_pdf_to_text (with use_ocr=True for scanned PDFs), then read the output
 - If pasted in chat: Extract from message directly
 
-**PHASE 3: EXECUTE OCR PIPELINE**
+**PHASE 3: EXECUTE DOCUMENT PROCESSING PIPELINE**
 
 Once you have materials, execute these steps IN ORDER:
 
-**Step 1: OCR Processing**
+**Step 1: Document Processing**
 - Call: batch_process_documents(directory_path=<clean_pdf_directory_from_prepare_files>, job_name=<descriptive_name>)
   - **CRITICAL**: Use the directory path returned by `prepare_files_for_grading`
   - Do NOT pass the `dpi` parameter unless specifically needed - omit it entirely to use the server default
   - **NEVER pass null/None for optional parameters** - if you don't need to specify a value, omit the key completely
-- This returns a job_id
-- Explain: "I'm processing the essays with OCR. This will detect student names and extract all the text. For handwritten essays, I'll separate them by student automatically..."
+- This returns a job_id and processing details (summary, text_extraction count, ocr count)
+- **Check the tool output** to see which method was used (Fast Text Extraction vs OCR).
+- **Explain to User based on the output**:
+  - If mostly **Fast Text Extraction**: "Great! I've processed your typed essays using fast text extraction (no OCR needed). Found [X] student records..."
+  - If mostly **OCR**: "I've processed your essays using OCR (since they appear to be scanned). Found [X] student records..."
+  - If **Mixed**: "Processed [X] files: [Y] via fast text extraction and [Z] via OCR. Found [Total] student records..."
 
 **PHASE 4: HUMAN INSPECTION CHECKPOINT**
 
@@ -343,10 +347,12 @@ Once you have materials, execute these steps IN ORDER:
   )
 - Explain: "Grading essays against your rubric with the reading materials as context..."
 - This may take a few minutes for 15 essays
+- **NOTE**: This step ONLY grades. It does NOT generate files. You MUST proceed to Step 6 immediately.
 
-**PHASE 8: GENERATE REPORTS**
+**PHASE 8: GENERATE REPORTS & OFFER EMAIL DISTRIBUTION**
 
-**Step 6: Generate Reports**
+**Step 6: Generate Reports (MANDATORY FOR ALL JOBS, SINGLE OR BATCH)**
+- **CRITICAL**: You MUST run this step even if there is only 1 essay.
 - Call: generate_gradebook(job_id=<job_id>)
   - This returns a file path to the CSV gradebook
 - Call: generate_student_feedback(job_id=<job_id>)
@@ -361,8 +367,21 @@ Once you have materials, execute these steps IN ORDER:
 
   📄 Student Feedback: [exact file path from generate_student_feedback]
 
-  Both files are ready for download using the download buttons above. Let me know if you need help accessing them!
+  Both files are ready for download using the download buttons above.
+
+  Would you like me to email these feedback reports directly to your students?
   ```
+
+**Step 7: Route to Email Distribution (if requested)**
+- If teacher says YES to email distribution:
+  - Call: complete_grading_workflow(job_id=<job_id>, route_to_email=True)
+  - Say: "Great! Let me help you distribute these via email."
+  - **The email distribution node will handle the rest**
+- If teacher says NO:
+  - Call: complete_grading_workflow(job_id=<job_id>, route_to_email=False)
+  - Say: "No problem! You can download the files above."
+
+**IMPORTANT: You MUST call complete_grading_workflow to finish the grading process and set routing.**
 
 **IMPORTANT NOTES:**
 - Student names must appear as "Name: John Doe" at TOP of FIRST PAGE only
@@ -441,9 +460,10 @@ Would you like to upload the corrected files, or should we proceed with what I h
 
 **Specific file format issues:**
 - **Google Docs (.gdoc)**: "Google Docs can't be processed directly. Please open [filename] in Google Drive, click File → Download → PDF, then upload that PDF file."
+- **Word Documents (.docx)**: "Word documents are no longer supported. Please open [filename] in Word, click File → Save As → PDF, then upload that PDF file."
 - **Corrupted files**: "The file [filename] appears to be corrupted. Try re-downloading or re-scanning it."
 - **Password-protected PDFs**: "The file [filename] is password-protected. Please remove the password or provide an unprotected version."
-- **Unsupported formats**: "The file [filename] is in a format I can't process. Please convert it to PDF, Word (.docx), JPG, or PNG."
+- **Unsupported formats**: "The file [filename] is in a format I can't process. Please convert it to PDF, JPG, or PNG."
 
 **REMEMBER**: You are a GUIDE to the MCP grading system, not a replacement for it. If the MCP server can't do its job, you can't either.
 
@@ -487,11 +507,32 @@ Remember: You are a GUIDE, not an autonomous system. Always ask for materials, n
         list_directory_files,
     )
 
+    # Add routing control tool
+    from langchain_core.tools import tool as tool_decorator
+
+    routing_state = {"next_step": "END", "job_id": None}
+
+    @tool_decorator
+    def complete_grading_workflow(job_id: str, route_to_email: bool) -> str:
+        """Complete the grading workflow and set routing for next step.
+
+        Args:
+            job_id: The job ID from the grading process
+            route_to_email: Whether to route to email distribution (True) or end (False)
+
+        Returns:
+            Confirmation message
+        """
+        routing_state["job_id"] = job_id
+        routing_state["next_step"] = "email_distribution" if route_to_email else "END"
+        return f"Routing configured: {'Proceeding to email distribution' if route_to_email else 'Workflow complete'}"
+
     # Add all utilities to tools
     tools = tools + [
         prepare_files_for_grading,
         read_text_file,
         list_directory_files,
+        complete_grading_workflow,
     ]
 
     llm = get_llm().bind_tools(tools)
@@ -551,8 +592,12 @@ Remember: You are a GUIDE, not an autonomous system. Always ask for materials, n
 
         iteration += 1
 
-    # Return the final state with all messages
-    return {"next_step": "END", "messages": messages[len(state["messages"]) :]}
+    # Return the final state with routing decision
+    return {
+        "next_step": routing_state["next_step"],
+        "job_id": routing_state["job_id"],
+        "messages": messages[len(state["messages"]) :],
+    }
 
 
 # --- Test Grading Expert Node ---
@@ -576,13 +621,18 @@ async def test_grading_node(state: AgentState) -> AgentState:
 
 You have access to OCR and document processing tools (same as essay grading).
 
-**Grading Approach for Tests:**
-1. Extract text from test PDFs
-2. Identify questions and student answers
-3. Compare against answer key (if provided)
-4. Award points based on correctness
-5. Provide brief feedback on incorrect answers
-6. Calculate total score
+**Grading Pipeline for Tests:**
+1. Gather materials (answer key, test PDFs)
+2. Process documents with batch_process_documents
+3. Review student manifest with get_job_statistics
+4. Scrub student names with scrub_processed_job
+5. Evaluate with evaluate_job (using answer key)
+6. Generate reports with generate_gradebook and generate_student_feedback
+7. **Offer email distribution**: Ask "Would you like me to email these feedback reports directly to your students?"
+   - If YES: Call complete_grading_workflow(job_id=<job_id>, route_to_email=True)
+   - If NO: Call complete_grading_workflow(job_id=<job_id>, route_to_email=False)
+
+**IMPORTANT: You MUST call complete_grading_workflow when grading is done to set routing.**
 
 Your grading is more objective and score-focused than essay grading. You check for correctness, not writing quality.
 
@@ -591,8 +641,10 @@ Always be fair and consistent in applying answer keys."""
     # Get grading-specific tools
     tools = await get_grading_tools()
 
-    # Add file reading tool
+    # Add file reading tool and routing control
     from langchain_core.tools import tool as tool_decorator
+
+    routing_state = {"next_step": "END", "job_id": None}
 
     @tool_decorator
     def read_file(file_path: str) -> str:
@@ -610,7 +662,22 @@ Always be fair and consistent in applying answer keys."""
         except Exception as e:
             return f"Error reading file: {str(e)}"
 
-    tools = tools + [read_file]
+    @tool_decorator
+    def complete_grading_workflow(job_id: str, route_to_email: bool) -> str:
+        """Complete the grading workflow and set routing for next step.
+
+        Args:
+            job_id: The job ID from the grading process
+            route_to_email: Whether to route to email distribution (True) or end (False)
+
+        Returns:
+            Confirmation message
+        """
+        routing_state["job_id"] = job_id
+        routing_state["next_step"] = "email_distribution" if route_to_email else "END"
+        return f"Routing configured: {'Proceeding to email distribution' if route_to_email else 'Workflow complete'}"
+
+    tools = tools + [read_file, complete_grading_workflow]
 
     llm = get_llm().bind_tools(tools)
     messages = [SystemMessage(content=system_prompt)] + list(state["messages"])
@@ -631,6 +698,218 @@ Always be fair and consistent in applying answer keys."""
         for tool_call in response.tool_calls:
             tool_name = tool_call["name"]
             tool_args = tool_call["args"]
+
+            matching_tool = next((t for t in tools if t.name == tool_name), None)
+            if matching_tool:
+                try:
+                    result = await matching_tool.ainvoke(tool_args)
+                    messages.append(
+                        ToolMessage(
+                            content=str(result),
+                            tool_call_id=tool_call["id"],
+                            name=tool_name,
+                        )
+                    )
+                except Exception as e:
+                    messages.append(
+                        ToolMessage(
+                            content=f"Error executing {tool_name}: {str(e)}",
+                            tool_call_id=tool_call["id"],
+                            name=tool_name,
+                        )
+                    )
+            else:
+                messages.append(
+                    ToolMessage(
+                        content=f"Tool {tool_name} not found",
+                        tool_call_id=tool_call["id"],
+                        name=tool_name,
+                    )
+                )
+
+        iteration += 1
+
+    # Return the final state with routing decision
+    return {
+        "next_step": routing_state["next_step"],
+        "job_id": routing_state["job_id"],
+        "messages": messages[len(state["messages"]) :],
+    }
+
+
+# --- Email Distribution Node ---
+async def email_distribution_node(state: AgentState) -> AgentState:
+    """Email distribution node for sending graded feedback to students.
+
+    This node handles the complete email distribution workflow:
+    1. Identify students with email/name matching problems
+    2. Teacher-in-the-loop correction for mismatched names
+    3. Send emails automatically using roster and credentials
+
+    Args:
+        state: Current agent state (must contain job_id)
+
+    Returns:
+        Updated state with email distribution results
+    """
+    system_prompt = """You are an email distribution assistant that helps teachers send graded feedback to students.
+
+**CRITICAL UNDERSTANDING: HOW EMAIL WORKS**
+
+The email system is **fully automated** and does NOT require you to ask for:
+- ❌ Student email addresses (already in roster file: school_names.csv)
+- ❌ Sender email or credentials (already in .env: FROM_EMAIL, SMTP_USER, SMTP_PASS)
+- ❌ Manual email lists or recipient details
+
+**What the system does automatically:**
+1. Reads student emails from the roster CSV (has name + email columns)
+2. Loads sender credentials from environment variables
+3. Matches graded students to roster entries
+4. Sends personalized feedback PDFs via email
+5. Reports success/failure for each student
+
+**YOUR ONLY JOB: Help match OCR'd names to roster names**
+
+When OCR extracts "Jhon Doe" from a handwritten essay, but the roster has "John Doe",
+you help the teacher confirm: "Is 'Jhon Doe' actually John Doe from your roster?"
+
+**THE COMPLETE EMAIL WORKFLOW:**
+
+**Step 1: Identify Problems**
+- Call: identify_email_problems(job_id=<from_state>)
+- This checks which students can't be automatically matched to the roster
+- Returns:
+  - `status: "ready"` → All students matched! Skip to Step 3
+  - `status: "needs_corrections"` → Some students need identification → Go to Step 2
+  - `students_needing_help`: List of students with matching issues
+
+**Step 2: Teacher-in-the-Loop Name Correction (if needed)**
+
+For EACH student in `students_needing_help`:
+
+**2a. Ask Teacher for Identification**
+- Show: "Student '[OCR'd Name]' (Grade: [Score]) couldn't be matched to your roster."
+- Ask: "What is this student's correct name from your class roster?"
+- **NEVER ask**: "What is their email?" (it's already in the roster!)
+
+**2b. Verify the Name**
+- Call: verify_student_name_correction(
+    job_id=<job_id>,
+    essay_id=<student_essay_id>,
+    suggested_name="<teacher's response>"
+  )
+- This checks if the suggested name matches someone in the roster
+- Returns one of:
+  - `match_found`: Exact match! Shows student details with email
+  - `no_exact_match`: Shows possible_matches list (similar names)
+  - `no_match`: Name not found in roster at all
+  - `no_email`: Name found but no email in roster
+
+**2c. Handle Verification Result**
+
+**If match_found:**
+- Show: "Found: [Name] <[Email]> in your roster. Is this correct?"
+- Wait for teacher confirmation (Yes/No/Skip)
+- If YES: Call apply_student_name_correction(job_id, essay_id, confirmed_name)
+  - Respond: "✓ Updated! This student will receive their feedback."
+- If NO or SKIP: Call skip_student_email(job_id, essay_id, reason="Teacher declined match")
+  - Respond: "Marked for manual delivery. You can email them directly."
+
+**If no_exact_match:**
+- Show: "I found similar names in your roster: [list possible_matches]. Which one is it?"
+- Present options: "[1] Name One, [2] Name Two, [3] Skip this student"
+- If teacher picks one: Use that name and verify again (go back to 2b)
+- If teacher says SKIP: Call skip_student_email(...)
+
+**If no_match or no_email:**
+- Explain: "I couldn't find '[Name]' in your roster" or "This student has no email on file"
+- Ask: "Would you like to try a different name, or skip this student for manual delivery?"
+- If try again: Ask for name and verify again
+- If SKIP: Call skip_student_email(job_id, essay_id, reason="Not in roster")
+
+**2d. Repeat Until All Students Are Resolved**
+- Keep looping through students_needing_help
+- Track progress: "3 of 5 students identified so far..."
+- When all are done: "Great! All students are ready for email delivery."
+
+**Step 3: Send Emails**
+- Call: send_student_feedback_emails(job_id=<job_id>)
+- This automatically:
+  - Finds each student's feedback PDF
+  - Looks up their email from the roster
+  - Sends personalized email with attachment
+  - Uses sender credentials from .env
+- Returns: Summary of sent/failed/skipped emails
+- Report to teacher:
+  ```
+  ✓ Email delivery complete!
+
+  📧 Successfully sent: [X] students
+  📋 Marked for manual delivery: [Y] students
+
+  Students who need manual delivery:
+  - [Name 1]: [Reason]
+  - [Name 2]: [Reason]
+  ```
+
+**CRITICAL RULES:**
+
+1. **NEVER ask for email addresses** - they're in the roster CSV
+2. **NEVER ask for sender info** - it's in the .env file
+3. **ONLY ask for name corrections** - to match OCR → roster
+4. **Be patient and clear** - teachers may not be tech-savvy
+5. **Explain what's happening** - "I'm checking your roster for this name..."
+6. **Celebrate progress** - "Great! 8 of 10 students matched!"
+7. **One student at a time** - don't overwhelm with bulk questions
+8. **Provide context** - show grade/score to help teacher identify student
+
+**ERROR HANDLING:**
+
+If any MCP tool fails:
+1. STOP immediately
+2. Report the error clearly: "I encountered an error while [action]: [error]"
+3. Suggest: "This might be a system issue. Would you like to retry?"
+4. DO NOT try workarounds or manual email sending
+
+**TOOLS AVAILABLE:**
+- identify_email_problems
+- verify_student_name_correction
+- apply_student_name_correction
+- skip_student_email
+- send_student_feedback_emails
+
+Remember: The system handles all the technical email work. You just help match names!"""
+
+    # Get email-specific tools from MCP server
+    from edagent.mcp_tools import get_email_tools
+
+    tools = await get_email_tools()
+
+    llm = get_llm().bind_tools(tools)
+
+    messages = [SystemMessage(content=system_prompt)] + list(state["messages"])
+
+    # Agentic loop for email workflow
+    max_iterations = 20  # May need multiple rounds for teacher-in-the-loop
+    iteration = 0
+
+    while iteration < max_iterations:
+        response = await llm.ainvoke(messages)
+        messages.append(response)
+
+        if not response.tool_calls:
+            # No more tool calls, workflow complete
+            break
+
+        from langchain_core.messages import ToolMessage
+
+        for tool_call in response.tool_calls:
+            tool_name = tool_call["name"]
+            tool_args = tool_call["args"]
+
+            # Inject job_id from state if not provided
+            if "job_id" in tool_args and tool_args["job_id"] is None:
+                tool_args["job_id"] = state.get("job_id")
 
             matching_tool = next((t for t in tools if t.name == tool_name), None)
             if matching_tool:
@@ -731,7 +1010,7 @@ politely suggest they ask a more specific question so you can route them appropr
 # --- Routing Logic ---
 def route_decision(
     state: AgentState,
-) -> Literal["essay_grading", "test_grading", "general"]:
+) -> Literal["essay_grading", "test_grading", "general", "email_distribution"]:
     """Conditional edge function that determines which expert to route to.
 
     Args:

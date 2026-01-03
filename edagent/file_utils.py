@@ -34,7 +34,7 @@ def prepare_files_for_grading(file_paths: List[str]) -> str:
     - PDF: Copies directly
     - ZIP: Extracts and flattens
     - Images (JPG, PNG, etc.): Converts to PDF
-    - Word (DOCX): Converts text to PDF
+    - Word (DOCX): Rejects with instruction (no longer supported)
     - Google Docs: Rejects with instruction
 
     Args:
@@ -66,9 +66,13 @@ def prepare_files_for_grading(file_paths: List[str]) -> str:
                 processed_count += 1
                 return
 
-            # Handle Google Docs shortcuts
+            # Handle Google Docs shortcuts and Word documents (no longer supported)
             if ext in ['.gdoc', '.gsheet', '.gslides']:
                 warnings.append(f"Rejected Google Doc shortcut: {filename}. Please export as PDF from Google Drive.")
+                return
+
+            if ext == '.docx':
+                warnings.append(f"Rejected Word document: {filename}. Please export as PDF before uploading.")
                 return
 
             # Handle Images
@@ -85,32 +89,6 @@ def prepare_files_for_grading(file_paths: List[str]) -> str:
                         warnings.append(f"Failed to convert image {filename}: {str(e)}")
                 else:
                     warnings.append(f"Cannot convert {filename}: Pillow library not available.")
-                return
-
-            # Handle Word Docs
-            if ext == '.docx':
-                if Document and FPDF:
-                    try:
-                        doc = Document(src_path)
-                        pdf = FPDF()
-                        pdf.add_page()
-                        pdf.set_font("Arial", size=12)
-                        
-                        # Extract text and write to PDF
-                        # Note: This is a basic text extraction, not full formatting preservation
-                        for para in doc.paragraphs:
-                            # Sanitize text for FPDF (latin-1 issue)
-                            text = para.text.encode('latin-1', 'replace').decode('latin-1')
-                            pdf.multi_cell(0, 10, txt=text)
-                            pdf.ln(2)
-                            
-                        pdf_path = os.path.join(dest_dir, f"{name}.pdf")
-                        pdf.output(pdf_path)
-                        processed_count += 1
-                    except Exception as e:
-                        warnings.append(f"Failed to convert Word doc {filename}: {str(e)}")
-                else:
-                    warnings.append(f"Cannot convert {filename}: python-docx or fpdf library not available.")
                 return
 
             # Unknown type

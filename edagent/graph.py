@@ -8,6 +8,7 @@ from edagent.nodes import (
     essay_grading_node,
     test_grading_node,
     general_node,
+    email_distribution_node,
     route_decision,
 )
 
@@ -18,7 +19,9 @@ def create_graph() -> StateGraph:
     The graph follows this pattern:
     1. User input goes to Router
     2. Router analyzes intent and routes to appropriate expert
-    3. Expert handles the request and returns response
+    3. Expert handles the request
+    4. Grading experts can optionally route to email distribution
+    5. Email distribution completes and ends workflow
 
     Returns:
         Compiled StateGraph ready for execution
@@ -31,6 +34,7 @@ def create_graph() -> StateGraph:
     workflow.add_node("essay_grading", essay_grading_node)
     workflow.add_node("test_grading", test_grading_node)
     workflow.add_node("general", general_node)
+    workflow.add_node("email_distribution", email_distribution_node)
 
     # Set entry point
     workflow.set_entry_point("router")
@@ -46,10 +50,30 @@ def create_graph() -> StateGraph:
         },
     )
 
-    # All expert nodes end the graph
-    workflow.add_edge("essay_grading", END)
-    workflow.add_edge("test_grading", END)
+    # Grading nodes can route to email distribution or end
+    workflow.add_conditional_edges(
+        "essay_grading",
+        route_decision,
+        {
+            "email_distribution": "email_distribution",
+            "END": END,
+        },
+    )
+
+    workflow.add_conditional_edges(
+        "test_grading",
+        route_decision,
+        {
+            "email_distribution": "email_distribution",
+            "END": END,
+        },
+    )
+
+    # General node always ends
     workflow.add_edge("general", END)
+
+    # Email distribution always ends after completing
+    workflow.add_edge("email_distribution", END)
 
     # Compile the graph with memory checkpointing
     memory = MemorySaver()

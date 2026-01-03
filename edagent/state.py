@@ -10,8 +10,10 @@ class AgentState(TypedDict):
 
     Attributes:
         messages: Conversation history (automatically merged by add_messages)
-        next_step: Routing decision ('grading', 'curriculum', 'general', or END)
+        next_step: Routing decision ('essay_grading', 'test_grading', 'general', 'email_distribution', or END)
+        job_id: Optional job ID for grading operations (passed to email distribution)
     """
 
     messages: Annotated[Sequence[BaseMessage], add_messages]
     next_step: str
+    job_id: str | None
