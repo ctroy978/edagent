@@ -47,6 +47,7 @@ def create_graph() -> StateGraph:
             "essay_grading": "essay_grading",
             "test_grading": "test_grading",
             "general": "general",
+            "email_distribution": "email_distribution",
         },
     )
 

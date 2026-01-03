@@ -19,8 +19,8 @@ class RouterDecision(BaseModel):
     """Structured output for routing decision."""
 
     reasoning: str = Field(description="Brief explanation of routing decision")
-    next_step: Literal["essay_grading", "test_grading", "general"] = Field(
-        description="Which expert to route to: essay_grading for written essays, test_grading for tests/quizzes, or general for other requests"
+    next_step: Literal["essay_grading", "test_grading", "general", "email_distribution"] = Field(
+        description="Which expert to route to: essay_grading for written essays, test_grading for tests/quizzes, email_distribution for sending graded feedback, or general for other requests"
     )
 
 
@@ -67,6 +67,31 @@ async def router_node(state: AgentState) -> AgentState:
     Returns:
         Updated state with routing decision
     """
+    # Check if there's a pending job_id and user is asking about email
+    from langchain_core.messages import AIMessage
+
+    job_id = state.get("job_id")
+    last_message = state["messages"][-1].content.lower() if state["messages"] else ""
+
+    # DEBUG: Print state info
+    print(f"[ROUTER DEBUG] job_id in state: {job_id}")
+    print(f"[ROUTER DEBUG] last_message: {last_message}")
+    print(f"[ROUTER DEBUG] full state keys: {state.keys()}")
+
+    # Keywords that indicate email intent
+    email_keywords = ["email", "send", "distribute", "mail", "yes", "yeah", "yep", "sure", "ok", "okay"]
+
+    if job_id and any(keyword in last_message for keyword in email_keywords):
+        # User has a completed grading job and is confirming email distribution
+        print(f"[ROUTER DEBUG] Routing to email_distribution with job_id: {job_id}")
+        return {
+            "next_step": "email_distribution",
+            "job_id": job_id,  # CRITICAL: Pass through the job_id
+            "messages": [AIMessage(content=f"Great! Let me help you distribute these via email. (Using job_id: {job_id})")],
+        }
+
+    print(f"[ROUTER DEBUG] Not routing to email - proceeding to LLM decision")
+
     system_prompt = """You are a helpful educational assistant and concierge. Your role is to understand what the user needs and route them to the appropriate specialist.
 
 The system has powerful OCR document processing tools for grading student work. You must determine WHAT TYPE of grading is needed:
@@ -119,6 +144,7 @@ IMPORTANT: Essay grading and test grading require different evaluation approache
         "essay_grading": "I'd be happy to help you grade those essays!",
         "test_grading": "I'll help you grade those tests!",
         "general": "I'm here to help with your question.",
+        "email_distribution": "Great! Let me help you distribute these via email.",
     }
 
     return {
@@ -354,34 +380,32 @@ Once you have materials, execute these steps IN ORDER:
 **Step 6: Generate Reports (MANDATORY FOR ALL JOBS, SINGLE OR BATCH)**
 - **CRITICAL**: You MUST run this step even if there is only 1 essay.
 - Call: generate_gradebook(job_id=<job_id>)
-  - This returns a file path to the CSV gradebook
+  - This stores the gradebook in the database
 - Call: generate_student_feedback(job_id=<job_id>)
-  - This returns a file path to a ZIP containing individual PDFs
-- **CRITICAL**: Check that both tools returned valid file paths (not errors)
+  - This stores student feedback PDFs and ZIP in the database
+- **CRITICAL**: Check that both tools returned success (not errors)
 - If either tool fails, report the error to the teacher (see ERROR HANDLING section)
-- If both succeed, announce completion and provide the file paths in this EXACT format:
+- **IMPORTANT**: After generating reports, call download_reports_locally(job_id=<job_id>)
+  - This downloads reports from database to local temp directory for teacher access
+  - Returns local file paths that the teacher can download
+- If download succeeds, announce completion and provide the LOCAL file paths in this EXACT format:
   ```
   Your grading is complete! Here are your results:
 
-  📊 Gradebook: [exact file path from generate_gradebook]
+  📊 Gradebook: [gradebook_path from download_reports_locally]
 
-  📄 Student Feedback: [exact file path from generate_student_feedback]
+  📄 Student Feedback: [feedback_zip_path from download_reports_locally]
 
   Both files are ready for download using the download buttons above.
-
-  Would you like me to email these feedback reports directly to your students?
   ```
 
-**Step 7: Route to Email Distribution (if requested)**
-- If teacher says YES to email distribution:
-  - Call: complete_grading_workflow(job_id=<job_id>, route_to_email=True)
-  - Say: "Great! Let me help you distribute these via email."
-  - **The email distribution node will handle the rest**
-- If teacher says NO:
-  - Call: complete_grading_workflow(job_id=<job_id>, route_to_email=False)
-  - Say: "No problem! You can download the files above."
+**Step 7: Route to Email Distribution (AUTOMATIC)**
+- **IMMEDIATELY after generating reports**, call: complete_grading_workflow(job_id=<job_id>, route_to_email=True)
+- This will route to the email distribution system automatically
+- **DO NOT ask the teacher** if they want to email - just proceed to email distribution
+- The teacher will be able to confirm email sending in the email distribution step
 
-**IMPORTANT: You MUST call complete_grading_workflow to finish the grading process and set routing.**
+**CRITICAL: You MUST call complete_grading_workflow IMMEDIATELY after Step 6. Do not skip this!**
 
 **IMPORTANT NOTES:**
 - Student names must appear as "Name: John Doe" at TOP of FIRST PAGE only
@@ -525,7 +549,10 @@ Remember: You are a GUIDE, not an autonomous system. Always ask for materials, n
         """
         routing_state["job_id"] = job_id
         routing_state["next_step"] = "email_distribution" if route_to_email else "END"
-        return f"Routing configured: {'Proceeding to email distribution' if route_to_email else 'Workflow complete'}"
+        if route_to_email:
+            return f"✓ Routing configured: Proceeding to email distribution with job_id={job_id}"
+        else:
+            return f"✓ Workflow complete for job_id={job_id}"
 
     # Add all utilities to tools
     tools = tools + [
@@ -628,11 +655,14 @@ You have access to OCR and document processing tools (same as essay grading).
 4. Scrub student names with scrub_processed_job
 5. Evaluate with evaluate_job (using answer key)
 6. Generate reports with generate_gradebook and generate_student_feedback
-7. **Offer email distribution**: Ask "Would you like me to email these feedback reports directly to your students?"
-   - If YES: Call complete_grading_workflow(job_id=<job_id>, route_to_email=True)
-   - If NO: Call complete_grading_workflow(job_id=<job_id>, route_to_email=False)
+7. **Download reports locally**: Call download_reports_locally(job_id=<job_id>)
+   - This downloads reports from database to local temp directory
+   - Provide the LOCAL file paths from this tool to the teacher
+8. **Route to Email Distribution (AUTOMATIC)**: IMMEDIATELY after downloading reports, call complete_grading_workflow(job_id=<job_id>, route_to_email=True)
+   - DO NOT ask the teacher if they want to email - just proceed automatically
+   - The teacher will confirm email sending in the email distribution step
 
-**IMPORTANT: You MUST call complete_grading_workflow when grading is done to set routing.**
+**CRITICAL: You MUST call download_reports_locally and complete_grading_workflow IMMEDIATELY after generating reports. Do not skip these steps!**
 
 Your grading is more objective and score-focused than essay grading. You check for correctness, not writing quality.
 
@@ -675,7 +705,10 @@ Always be fair and consistent in applying answer keys."""
         """
         routing_state["job_id"] = job_id
         routing_state["next_step"] = "email_distribution" if route_to_email else "END"
-        return f"Routing configured: {'Proceeding to email distribution' if route_to_email else 'Workflow complete'}"
+        if route_to_email:
+            return f"✓ Routing configured: Proceeding to email distribution with job_id={job_id}"
+        else:
+            return f"✓ Workflow complete for job_id={job_id}"
 
     tools = tools + [read_file, complete_grading_workflow]
 
@@ -752,133 +785,56 @@ async def email_distribution_node(state: AgentState) -> AgentState:
     Returns:
         Updated state with email distribution results
     """
-    system_prompt = """You are an email distribution assistant that helps teachers send graded feedback to students.
+    # Extract job_id from state
+    job_id_from_state = state.get("job_id")
 
-**CRITICAL UNDERSTANDING: HOW EMAIL WORKS**
+    # DEBUG: Print what email node receives
+    print(f"[EMAIL NODE DEBUG] Received state keys: {state.keys()}")
+    print(f"[EMAIL NODE DEBUG] job_id from state: {job_id_from_state}")
+    print(f"[EMAIL NODE DEBUG] Full state: {dict(state)}")
 
-The email system is **fully automated** and does NOT require you to ask for:
-- ❌ Student email addresses (already in roster file: school_names.csv)
-- ❌ Sender email or credentials (already in .env: FROM_EMAIL, SMTP_USER, SMTP_PASS)
-- ❌ Manual email lists or recipient details
+    # Safety check: ensure we have a job_id
+    if not job_id_from_state:
+        from langchain_core.messages import AIMessage
+        return {
+            "next_step": "END",
+            "messages": [
+                AIMessage(
+                    content="⚠️ Error: No job_id was provided from the grading workflow. "
+                    "Please complete a grading task first before attempting to send emails."
+                )
+            ],
+        }
 
-**What the system does automatically:**
-1. Reads student emails from the roster CSV (has name + email columns)
-2. Loads sender credentials from environment variables
-3. Matches graded students to roster entries
-4. Sends personalized feedback PDFs via email
-5. Reports success/failure for each student
+    system_prompt = f"""You are an automated email distribution system. A grading job (job_id: {job_id_from_state}) has completed.
 
-**YOUR ONLY JOB: Help match OCR'd names to roster names**
+**YOUR ONLY TASK: CALL ONE TOOL AND REPORT THE RESULTS**
 
-When OCR extracts "Jhon Doe" from a handwritten essay, but the roster has "John Doe",
-you help the teacher confirm: "Is 'Jhon Doe' actually John Doe from your roster?"
+The email system is fully automatic and handles:
+- ✓ Student name matching (with fuzzy matching for OCR errors)
+- ✓ Email address lookup from roster
+- ✓ PDF retrieval from database
+- ✓ Email sending with attachments
+- ✓ Logging and error handling
 
-**THE COMPLETE EMAIL WORKFLOW:**
+**WORKFLOW:**
 
-**Step 1: Identify Problems**
-- Call: identify_email_problems(job_id=<from_state>)
-- This checks which students can't be automatically matched to the roster
-- Returns:
-  - `status: "ready"` → All students matched! Skip to Step 3
-  - `status: "needs_corrections"` → Some students need identification → Go to Step 2
-  - `students_needing_help`: List of students with matching issues
+**Step 1: Send emails (IMMEDIATE)**
+- IMMEDIATELY call: send_student_feedback_emails(job_id="{job_id_from_state}")
+- DO NOT ask for confirmation - just call the tool
+- The tool returns a summary of sent/skipped students
 
-**Step 2: Teacher-in-the-Loop Name Correction (if needed)**
-
-For EACH student in `students_needing_help`:
-
-**2a. Ask Teacher for Identification**
-- Show: "Student '[OCR'd Name]' (Grade: [Score]) couldn't be matched to your roster."
-- Ask: "What is this student's correct name from your class roster?"
-- **NEVER ask**: "What is their email?" (it's already in the roster!)
-
-**2b. Verify the Name**
-- Call: verify_student_name_correction(
-    job_id=<job_id>,
-    essay_id=<student_essay_id>,
-    suggested_name="<teacher's response>"
-  )
-- This checks if the suggested name matches someone in the roster
-- Returns one of:
-  - `match_found`: Exact match! Shows student details with email
-  - `no_exact_match`: Shows possible_matches list (similar names)
-  - `no_match`: Name not found in roster at all
-  - `no_email`: Name found but no email in roster
-
-**2c. Handle Verification Result**
-
-**If match_found:**
-- Show: "Found: [Name] <[Email]> in your roster. Is this correct?"
-- Wait for teacher confirmation (Yes/No/Skip)
-- If YES: Call apply_student_name_correction(job_id, essay_id, confirmed_name)
-  - Respond: "✓ Updated! This student will receive their feedback."
-- If NO or SKIP: Call skip_student_email(job_id, essay_id, reason="Teacher declined match")
-  - Respond: "Marked for manual delivery. You can email them directly."
-
-**If no_exact_match:**
-- Show: "I found similar names in your roster: [list possible_matches]. Which one is it?"
-- Present options: "[1] Name One, [2] Name Two, [3] Skip this student"
-- If teacher picks one: Use that name and verify again (go back to 2b)
-- If teacher says SKIP: Call skip_student_email(...)
-
-**If no_match or no_email:**
-- Explain: "I couldn't find '[Name]' in your roster" or "This student has no email on file"
-- Ask: "Would you like to try a different name, or skip this student for manual delivery?"
-- If try again: Ask for name and verify again
-- If SKIP: Call skip_student_email(job_id, essay_id, reason="Not in roster")
-
-**2d. Repeat Until All Students Are Resolved**
-- Keep looping through students_needing_help
-- Track progress: "3 of 5 students identified so far..."
-- When all are done: "Great! All students are ready for email delivery."
-
-**Step 3: Send Emails**
-- Call: send_student_feedback_emails(job_id=<job_id>)
-- This automatically:
-  - Finds each student's feedback PDF
-  - Looks up their email from the roster
-  - Sends personalized email with attachment
-  - Uses sender credentials from .env
-- Returns: Summary of sent/failed/skipped emails
-- Report to teacher:
-  ```
-  ✓ Email delivery complete!
-
-  📧 Successfully sent: [X] students
-  📋 Marked for manual delivery: [Y] students
-
-  Students who need manual delivery:
-  - [Name 1]: [Reason]
-  - [Name 2]: [Reason]
-  ```
+**Step 2: Report results**
+- After the tool returns, report the results to the teacher:
+  - "✓ Sent feedback emails to X students"
+  - If students were skipped, list them: "⚠ Skipped Y students: [names and reasons]"
+  - Explain that skipped students can be emailed manually if needed
 
 **CRITICAL RULES:**
-
-1. **NEVER ask for email addresses** - they're in the roster CSV
-2. **NEVER ask for sender info** - it's in the .env file
-3. **ONLY ask for name corrections** - to match OCR → roster
-4. **Be patient and clear** - teachers may not be tech-savvy
-5. **Explain what's happening** - "I'm checking your roster for this name..."
-6. **Celebrate progress** - "Great! 8 of 10 students matched!"
-7. **One student at a time** - don't overwhelm with bulk questions
-8. **Provide context** - show grade/score to help teacher identify student
-
-**ERROR HANDLING:**
-
-If any MCP tool fails:
-1. STOP immediately
-2. Report the error clearly: "I encountered an error while [action]: [error]"
-3. Suggest: "This might be a system issue. Would you like to retry?"
-4. DO NOT try workarounds or manual email sending
-
-**TOOLS AVAILABLE:**
-- identify_email_problems
-- verify_student_name_correction
-- apply_student_name_correction
-- skip_student_email
-- send_student_feedback_emails
-
-Remember: The system handles all the technical email work. You just help match names!"""
+1. NEVER ask for: email addresses, subject lines, message content, sender email, or confirmation
+2. NEVER use any other tools (identify_email_problems, verify_student_name_correction, etc.)
+3. Just call send_student_feedback_emails and report the results
+4. The tool handles all name matching automatically - no teacher intervention needed"""
 
     # Get email-specific tools from MCP server
     from edagent.mcp_tools import get_email_tools
@@ -887,7 +843,14 @@ Remember: The system handles all the technical email work. You just help match n
 
     llm = get_llm().bind_tools(tools)
 
-    messages = [SystemMessage(content=system_prompt)] + list(state["messages"])
+    # Add a forcing message to trigger immediate action
+    from langchain_core.messages import AIMessage
+
+    messages = [
+        SystemMessage(content=system_prompt),
+    ] + list(state["messages"]) + [
+        AIMessage(content=f"I'll check for any name matching issues with job {job_id_from_state}.")
+    ]
 
     # Agentic loop for email workflow
     max_iterations = 20  # May need multiple rounds for teacher-in-the-loop
@@ -907,8 +870,14 @@ Remember: The system handles all the technical email work. You just help match n
             tool_name = tool_call["name"]
             tool_args = tool_call["args"]
 
-            # Inject job_id from state if not provided
-            if "job_id" in tool_args and tool_args["job_id"] is None:
+            # Inject job_id from state if not provided or is None
+            if "job_id" in tool_args:
+                if tool_args["job_id"] is None or tool_args["job_id"] == "":
+                    tool_args["job_id"] = state.get("job_id")
+            # If tool expects job_id but didn't include it, add it
+            # Check if this tool has a job_id parameter by trying to invoke with it
+            else:
+                # Add job_id for email tools (they all expect it)
                 tool_args["job_id"] = state.get("job_id")
 
             matching_tool = next((t for t in tools if t.name == tool_name), None)
@@ -1010,7 +979,7 @@ politely suggest they ask a more specific question so you can route them appropr
 # --- Routing Logic ---
 def route_decision(
     state: AgentState,
-) -> Literal["essay_grading", "test_grading", "general", "email_distribution"]:
+) -> Literal["essay_grading", "test_grading", "general", "email_distribution", "END"]:
     """Conditional edge function that determines which expert to route to.
 
     Args:

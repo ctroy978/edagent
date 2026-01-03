@@ -169,6 +169,7 @@ async def get_grading_tools() -> List[StructuredTool]:
         "evaluate_job",
         "generate_gradebook",
         "generate_student_feedback",
+        "download_reports",  # For downloading reports from DB to local temp
         "add_to_knowledge_base",
         "query_knowledge_base",
         "search_past_jobs",
@@ -199,6 +200,7 @@ async def get_email_tools() -> List[StructuredTool]:
         "apply_student_name_correction",
         "skip_student_email",
         "send_student_feedback_emails",
+        "get_email_log",
     ]
     return [
         tool

@@ -112,9 +112,11 @@ async def on_message(message: cl.Message):
 
         # Prepare initial state with just the new message
         # LangGraph memory will handle conversation history automatically
+        # NOTE: Don't include job_id here - it persists from the checkpoint
+        # next_step will be set by router, but we need to provide a value
         initial_state = {
             "messages": [HumanMessage(content=message_content)],
-            "next_step": "",
+            "next_step": "",  # Router will set the actual value
         }
 
         # Config with thread_id for memory persistence
@@ -134,6 +136,7 @@ async def on_message(message: cl.Message):
                 "essay_grading": "📝 Processing essay grading request",
                 "test_grading": "📋 Processing test grading request",
                 "general": "💬 Preparing response",
+                "email_distribution": "📧 Preparing email distribution",
             }
 
             async for output in graph.astream(initial_state, config):
