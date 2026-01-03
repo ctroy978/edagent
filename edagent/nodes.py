@@ -586,6 +586,9 @@ Remember: You are a GUIDE, not an autonomous system. Always ask for materials, n
             tool_name = tool_call["name"]
             tool_args = tool_call["args"]
 
+            # Debug logging
+            print(f"[ESSAY_GRADING] Iteration {iteration}: Calling tool '{tool_name}' with args: {tool_args}", flush=True)
+
             # Find and execute the tool
             matching_tool = next((t for t in tools if t.name == tool_name), None)
             if matching_tool:
@@ -732,6 +735,9 @@ Always be fair and consistent in applying answer keys."""
             tool_name = tool_call["name"]
             tool_args = tool_call["args"]
 
+            # Debug logging
+            print(f"[TEST_GRADING] Iteration {iteration}: Calling tool '{tool_name}' with args: {tool_args}", flush=True)
+
             matching_tool = next((t for t in tools if t.name == tool_name), None)
             if matching_tool:
                 try:
@@ -869,6 +875,9 @@ The email system is fully automatic and handles:
         for tool_call in response.tool_calls:
             tool_name = tool_call["name"]
             tool_args = tool_call["args"]
+
+            # Debug logging
+            print(f"[EMAIL_DISTRIBUTION] Iteration {iteration}: Calling tool '{tool_name}' with args: {tool_args}", flush=True)
 
             # Inject job_id from state if not provided or is None
             if "job_id" in tool_args:
