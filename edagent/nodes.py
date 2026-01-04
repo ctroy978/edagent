@@ -399,13 +399,28 @@ Once you have materials, execute these steps IN ORDER:
   Both files are ready for download using the download buttons above.
   ```
 
-**Step 7: Route to Email Distribution (AUTOMATIC)**
-- **IMMEDIATELY after generating reports**, call: complete_grading_workflow(job_id=<job_id>, route_to_email=True)
-- This will route to the email distribution system automatically
-- **DO NOT ask the teacher** if they want to email - just proceed to email distribution
-- The teacher will be able to confirm email sending in the email distribution step
+**Step 7: Ask Teacher AND Call Tool (SAME TURN!)**
+- **CRITICAL - You MUST do BOTH of these in the SAME turn:**
+  1. First, ask: "Would you like me to email these feedback reports to your students?"
+  2. Then **IMMEDIATELY call the tool**: complete_grading_workflow(job_id="<job_id_from_step_6_response>", route_to_email=False)
+     - Use the EXACT job_id from download_reports_locally response (e.g., "job_20260103_112353_be00d4b2")
+     - Use route_to_email=False for now (teacher hasn't responded yet)
+     - This saves the job_id so the router can access it when teacher responds
 
-**CRITICAL: You MUST call complete_grading_workflow IMMEDIATELY after Step 6. Do not skip this!**
+**WHY THIS IS CRITICAL:**
+- You must call the tool BEFORE the teacher responds
+- The grading workflow ends after you ask the question
+- When teacher responds "email students", the router needs the job_id to route correctly
+- If you don't call the tool now, job_id will be None and email distribution will fail
+
+**EXAMPLE - Your response should include BOTH:**
+```
+"Your grading is complete! Here are your results:
+[download links]
+Would you like me to email these feedback reports to your students?"
+
+AND tool_calls: [complete_grading_workflow(job_id="job_20260103_112353_be00d4b2", route_to_email=False)]
+```
 
 **IMPORTANT NOTES:**
 - Student names must appear as "Name: John Doe" at TOP of FIRST PAGE only
@@ -661,11 +676,15 @@ You have access to OCR and document processing tools (same as essay grading).
 7. **Download reports locally**: Call download_reports_locally(job_id=<job_id>)
    - This downloads reports from database to local temp directory
    - Provide the LOCAL file paths from this tool to the teacher
-8. **Route to Email Distribution (AUTOMATIC)**: IMMEDIATELY after downloading reports, call complete_grading_workflow(job_id=<job_id>, route_to_email=True)
-   - DO NOT ask the teacher if they want to email - just proceed automatically
-   - The teacher will confirm email sending in the email distribution step
+8. **Ask Teacher AND Call Tool (SAME TURN!)**:
+   - **CRITICAL - Do BOTH in the SAME response:**
+     1. Ask: "Would you like me to email these feedback reports to your students?"
+     2. **IMMEDIATELY call**: complete_grading_workflow(job_id="<job_id_from_step_7>", route_to_email=False)
+        - Use the EXACT job_id from download_reports_locally response
+        - Use route_to_email=False (teacher hasn't confirmed yet)
+        - This saves job_id so router can access it when teacher responds with "email students"
 
-**CRITICAL: You MUST call download_reports_locally and complete_grading_workflow IMMEDIATELY after generating reports. Do not skip these steps!**
+**CRITICAL: You MUST call complete_grading_workflow BEFORE the teacher responds, otherwise job_id will be None and email will fail!**
 
 Your grading is more objective and score-focused than essay grading. You check for correctness, not writing quality.
 
@@ -825,22 +844,25 @@ The email system is fully automatic and handles:
 
 **WORKFLOW:**
 
-**Step 1: Send emails (IMMEDIATE)**
-- IMMEDIATELY call: send_student_feedback_emails(job_id="{job_id_from_state}")
-- DO NOT ask for confirmation - just call the tool
+**Step 1: Send emails (ONE TIME ONLY)**
+- Call send_student_feedback_emails(job_id="{job_id_from_state}") EXACTLY ONCE
+- **DO NOT call this tool multiple times - ONE call only!**
 - The tool returns a summary of sent/skipped students
 
-**Step 2: Report results**
-- After the tool returns, report the results to the teacher:
-  - "✓ Sent feedback emails to X students"
-  - If students were skipped, list them: "⚠ Skipped Y students: [names and reasons]"
-  - Explain that skipped students can be emailed manually if needed
+**Step 2: Report results and STOP**
+- After the tool returns (even if errors occurred), report the results and STOP
+- Report format:
+  - If emails sent: "✓ Sent feedback emails to X students"
+  - If students skipped: "⚠ Skipped Y students: [names and reasons]"
+  - If errors: "⚠ Error: [error message]"
+- Then STOP - do not call any more tools
 
 **CRITICAL RULES:**
-1. NEVER ask for: email addresses, subject lines, message content, sender email, or confirmation
+1. Call send_student_feedback_emails ONLY ONCE - never retry or call again
 2. NEVER use any other tools (identify_email_problems, verify_student_name_correction, etc.)
-3. Just call send_student_feedback_emails and report the results
-4. The tool handles all name matching automatically - no teacher intervention needed"""
+3. After getting the tool response, report results and STOP immediately
+4. Do not ask for confirmation, email addresses, or any other information
+5. The tool handles all name matching automatically - no teacher intervention needed"""
 
     # Get email-specific tools from MCP server
     from edagent.mcp_tools import get_email_tools
@@ -855,7 +877,7 @@ The email system is fully automatic and handles:
     messages = [
         SystemMessage(content=system_prompt),
     ] + list(state["messages"]) + [
-        AIMessage(content=f"I'll check for any name matching issues with job {job_id_from_state}.")
+        AIMessage(content=f"I'll send the feedback emails now for job {job_id_from_state}.")
     ]
 
     # Agentic loop for email workflow
