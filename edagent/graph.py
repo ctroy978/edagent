@@ -5,7 +5,11 @@ from langgraph.checkpoint.memory import MemorySaver
 from edagent.state import AgentState
 from edagent.nodes import (
     router_node,
-    essay_grading_node,
+    gather_materials_node,
+    prepare_essays_node,
+    inspect_and_scrub_node,
+    evaluate_essays_node,
+    generate_reports_node,
     test_grading_node,
     general_node,
     email_distribution_node,
@@ -31,7 +35,15 @@ def create_graph() -> StateGraph:
 
     # Add nodes
     workflow.add_node("router", router_node)
-    workflow.add_node("essay_grading", essay_grading_node)
+
+    # 5-node essay grading chain
+    workflow.add_node("gather_materials", gather_materials_node)
+    workflow.add_node("prepare_essays", prepare_essays_node)
+    workflow.add_node("inspect_and_scrub", inspect_and_scrub_node)
+    workflow.add_node("evaluate_essays", evaluate_essays_node)
+    workflow.add_node("generate_reports", generate_reports_node)
+
+    # Other specialist nodes
     workflow.add_node("test_grading", test_grading_node)
     workflow.add_node("general", general_node)
     workflow.add_node("email_distribution", email_distribution_node)
@@ -44,19 +56,52 @@ def create_graph() -> StateGraph:
         "router",
         route_decision,
         {
-            "essay_grading": "essay_grading",
+            "gather_materials": "gather_materials",  # Start of 5-node essay grading chain
             "test_grading": "test_grading",
             "general": "general",
             "email_distribution": "email_distribution",
         },
     )
 
-    # Grading nodes can route to email distribution or end
+    # Conditional routing for essay grading workflow
+    # Nodes can route to next phase or END (waiting for next user message)
     workflow.add_conditional_edges(
-        "essay_grading",
+        "gather_materials",
         route_decision,
         {
-            "email_distribution": "email_distribution",
+            "prepare_essays": "prepare_essays",
+            "END": END,
+        },
+    )
+    workflow.add_conditional_edges(
+        "prepare_essays",
+        route_decision,
+        {
+            "inspect_and_scrub": "inspect_and_scrub",
+            "END": END,
+        },
+    )
+    workflow.add_conditional_edges(
+        "inspect_and_scrub",
+        route_decision,
+        {
+            "evaluate_essays": "evaluate_essays",
+            "END": END,
+        },
+    )
+    workflow.add_conditional_edges(
+        "evaluate_essays",
+        route_decision,
+        {
+            "generate_reports": "generate_reports",
+            "END": END,
+        },
+    )
+    workflow.add_conditional_edges(
+        "generate_reports",
+        route_decision,
+        {
+            "router": "router",
             "END": END,
         },
     )

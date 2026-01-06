@@ -114,17 +114,29 @@ async def get_mcp_tools() -> List[StructuredTool]:
                 if "required" in input_schema and "dpi" in input_schema["required"]:
                     input_schema["required"].remove("dpi")
 
+            # SPECIAL HANDLING: convert_pdf_to_text
+            # Make use_ocr optional in the schema
+            # We will inject the default value in the execution wrapper
+            if tool_name == "convert_pdf_to_text":
+                if "required" in input_schema and "use_ocr" in input_schema["required"]:
+                    input_schema["required"].remove("use_ocr")
+
             args_schema = _json_schema_to_pydantic(f"{tool_name}_input", input_schema)
 
             # Create async wrapper function for tool execution
             async def make_tool_func(name: str):
                 async def tool_func(**kwargs) -> str:
                     """Execute MCP tool and return result."""
-                    
+
                     # Inject default DPI for batch processing if not provided or explicitly None
                     if name == "batch_process_documents":
                         if "dpi" not in kwargs or kwargs["dpi"] is None:
                             kwargs["dpi"] = 300
+
+                    # Inject default use_ocr for PDF conversion if not provided or explicitly None
+                    if name == "convert_pdf_to_text":
+                        if "use_ocr" not in kwargs or kwargs["use_ocr"] is None:
+                            kwargs["use_ocr"] = False  # Default to fast text extraction
 
                     async with get_mcp_session() as sess:
                         result = await sess.call_tool(name, arguments=kwargs)

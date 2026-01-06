@@ -70,7 +70,7 @@ User Message
 └──────┬───────┘
        │
        │ Analyzes intent using LLM
-       │ Returns: RouterDecision(next_step="essay_grading" | "test_grading" | "general" | "email_distribution")
+       │ Returns: RouterDecision(next_step="gather_materials" | "test_grading" | "general" | "email_distribution")
        │
        ↓
 ┌──────────────────────────────────────┐
@@ -78,7 +78,9 @@ User Message
 │  (based on RouterDecision.next_step) │
 └──────┬───────────────────────────────┘
        │
-       ├──▶ essay_grading_node (has MCP tools)
+       ├──▶ 5-node Essay Grading Chain:
+       │    gather_materials → prepare_essays → inspect_and_scrub
+       │    → evaluate_essays → generate_reports → router
        │
        ├──▶ test_grading_node (has MCP tools)
        │
@@ -100,12 +102,36 @@ User Message
 
 ```python
 class AgentState(TypedDict):
+    # Core messaging and routing
     messages: Annotated[Sequence[BaseMessage], operator.add]
     next_step: str  # Router decision: which node to execute next
     job_id: Optional[str]  # Carries job_id between grading → router → email
+
+    # Workflow tracking (NEW)
+    current_phase: Optional[str]  # "gather", "prepare", "inspect", "evaluate", "report"
+
+    # Gathered materials (NEW)
+    rubric_text: Optional[str]
+    question_text: Optional[str]
+    reading_materials_paths: Optional[List[str]]
+    context_material: Optional[str]  # Retrieved from knowledge base
+
+    # Progress flags (NEW)
+    materials_added_to_kb: bool
+    ocr_complete: bool
+    scrubbing_complete: bool
+    evaluation_complete: bool
+
+    # Processing metadata (NEW)
+    clean_directory_path: Optional[str]
+    student_count: Optional[int]
+    essay_format: Optional[str]  # "handwritten" or "typed"
 ```
 
-**State is the ONLY way data flows between nodes.** No global variables.
+**Hybrid State Management:**
+- **Artifacts** (essays, evaluations, reports) stored in EDMCP database for persistence
+- **Workflow state** (progress, materials, flags) tracked in AgentState for orchestration
+- State is the ONLY way data flows between nodes - no global variables
 
 #### Router Node (`nodes.py:58-159`)
 
@@ -147,51 +173,57 @@ Each specialist node:
 1. **Has a custom system prompt** defining its expertise
 2. **Has access to specific tools** (grading nodes get MCP tools)
 3. **Runs an agentic loop** (calls tools iteratively until task complete)
-4. **Returns state update** (next_step, job_id, messages)
+4. **Returns state update** (next_step, job_id, messages, and phase-specific data)
 
-**Example:** Essay Grading Node (`nodes.py:163-645`)
+**Essay Grading: 5-Node Checklist Pattern**
 
-```python
-async def essay_grading_node(state: AgentState) -> AgentState:
-    # System prompt with 8-phase grading workflow
-    system_prompt = """You are an essay grading assistant...
-    Phase 1: Gather rubric
-    Phase 2: Gather essays
-    Phase 3: OCR processing
-    ...
-    Phase 8: Ask about emailing AND call complete_grading_workflow()
-    """
+Essay grading is implemented as a **linear chain of 5 specialized nodes**, each handling one phase:
 
-    # Get MCP tools
-    tools = await get_grading_tools()
-    tools += [complete_grading_workflow]  # Routing control
+1. **`gather_materials_node`** (Phase 0 & 1)
+   - Presents overview (first time only)
+   - Asks for rubric, question, reading materials
+   - Asks for essay format and student count
+   - Updates: `rubric_text`, `question_text`, `reading_materials_paths`, `essay_format`, `student_count`
+   - Routes to: `prepare_essays`
 
-    llm = get_llm().bind_tools(tools)
+2. **`prepare_essays_node`** (Phase 2 & 3)
+   - Asks for essay uploads
+   - Calls `prepare_files_for_grading` (handles ZIP, images, PDFs)
+   - Adds reading materials to knowledge base (if provided)
+   - Calls `batch_process_documents` for OCR
+   - Updates: `job_id`, `clean_directory_path`, `materials_added_to_kb`, `ocr_complete`
+   - Routes to: `inspect_and_scrub`
 
-    # Agentic loop (up to 10 iterations)
-    routing_state = {"next_step": "END", "job_id": None}
+3. **`inspect_and_scrub_node`** (Phase 4 & 5)
+   - Calls `get_job_statistics` to show student manifest
+   - Asks teacher: "Does this look correct?"
+   - Calls `scrub_processed_job` to remove PII
+   - Updates: `scrubbing_complete`
+   - Routes to: `evaluate_essays`
 
-    while iteration < max_iterations:
-        response = await llm.ainvoke(messages)
-        if not response.tool_calls:
-            break
+4. **`evaluate_essays_node`** (Phase 6 & 7)
+   - Queries knowledge base for context (if materials added)
+   - Calls `evaluate_job` with rubric, context, and question
+   - Updates: `evaluation_complete`, `context_material`
+   - Routes to: `generate_reports`
 
-        # Execute tool calls...
-        for tool_call in response.tool_calls:
-            result = await execute_tool(tool_call)
-            messages.append(ToolMessage(content=result))
+5. **`generate_reports_node`** (Phase 8)
+   - Calls `generate_gradebook` and `generate_student_feedback`
+   - Calls `download_reports_locally` to get file paths
+   - Shows download links to teacher
+   - Asks: "Would you like to email these reports?"
+   - **CRITICAL:** Calls `complete_grading_workflow(job_id, route_to_email=False)` to save job_id
+   - Routes to: `router` (for email routing)
 
-        iteration += 1
+**Benefits of 5-Node Chain:**
+- Each node ~100-150 lines (vs 645 lines monolithic)
+- Clear responsibility separation
+- Easy to modify individual phases
+- State tracks progress through workflow
+- Can resume from any phase
+- Better error isolation
 
-    # Return state with job_id for email routing
-    return {
-        "next_step": routing_state["next_step"],
-        "job_id": routing_state["job_id"],
-        "messages": messages[len(state["messages"]):]
-    }
-```
-
-**Critical Pattern:** Specialist nodes **store job_id in state** so the router can pass it to email_distribution node.
+**Critical Pattern:** The final node (`generate_reports`) routes back to the router with `job_id` preserved in state, enabling email distribution routing.
 
 #### MCP Tool Connection (`mcp_tools.py`)
 
@@ -224,10 +256,18 @@ workflow = StateGraph(AgentState)
 
 # Add nodes
 workflow.add_node("router", router_node)  # ENTRY POINT
-workflow.add_node("essay_grading", essay_grading_node)
+
+# 5-node essay grading chain
+workflow.add_node("gather_materials", gather_materials_node)
+workflow.add_node("prepare_essays", prepare_essays_node)
+workflow.add_node("inspect_and_scrub", inspect_and_scrub_node)
+workflow.add_node("evaluate_essays", evaluate_essays_node)
+workflow.add_node("generate_reports", generate_reports_node)
+
+# Other specialist nodes
 workflow.add_node("test_grading", test_grading_node)
-workflow.add_node("email_distribution", email_distribution_node)
 workflow.add_node("general", general_node)
+workflow.add_node("email_distribution", email_distribution_node)
 
 # Router is the entry point
 workflow.set_entry_point("router")
@@ -237,25 +277,40 @@ workflow.add_conditional_edges(
     "router",
     route_decision,  # Looks at state["next_step"]
     {
-        "essay_grading": "essay_grading",
+        "gather_materials": "gather_materials",  # Start of essay chain
         "test_grading": "test_grading",
         "email_distribution": "email_distribution",
         "general": "general",
-        "END": END
     }
 )
 
-# All specialists return to END
-workflow.add_edge("essay_grading", END)
-workflow.add_edge("test_grading", END)
-workflow.add_edge("email_distribution", END)
+# Linear chain for essay grading workflow
+workflow.add_edge("gather_materials", "prepare_essays")
+workflow.add_edge("prepare_essays", "inspect_and_scrub")
+workflow.add_edge("inspect_and_scrub", "evaluate_essays")
+workflow.add_edge("evaluate_essays", "generate_reports")
+workflow.add_edge("generate_reports", "router")  # Back to router for email routing
+
+# Test grading can route to email or end
+workflow.add_conditional_edges(
+    "test_grading",
+    route_decision,
+    {"email_distribution": "email_distribution", "END": END}
+)
+
+# General and email always end
 workflow.add_edge("general", END)
+workflow.add_edge("email_distribution", END)
 
 # Compile with memory
 app = workflow.compile(checkpointer=MemorySaver())
 ```
 
-**Key:** Router is the **entry point**. All user messages flow through router first.
+**Key Features:**
+- Router is the **entry point** - all user messages flow through router first
+- Essay grading uses a **linear chain** of 5 nodes for clear workflow progression
+- `generate_reports` routes back to router to enable email distribution routing
+- State is automatically persisted between messages via `MemorySaver`
 
 ---
 
@@ -704,10 +759,11 @@ When working on this codebase:
 
 ### ✅ DO:
 1. **Understand the router-first architecture** - User input → Router → Specialist
-2. **Respect single-responsibility** - One tool = one job
-3. **Use state for data flow** - Pass job_id, next_step through state
-4. **Follow the grading pipeline** - OCR → Inspect → Scrub → Evaluate → Report
-5. **Check both repos** - Bug could be in agent (edagent) OR server (edmcp)
+2. **Respect single-responsibility** - One tool = one job, one node = one phase
+3. **Use state for data flow** - Pass job_id, next_step, and workflow data through state
+4. **Follow the 5-node essay grading chain** - gather → prepare → inspect → evaluate → generate_reports
+5. **Understand hybrid state management** - Artifacts in DB (persistent), workflow in state (ephemeral)
+6. **Check both repos** - Bug could be in agent (edagent) OR server (edmcp)
 
 ### ❌ DON'T:
 1. **Skip the router** - All input goes through router first
@@ -722,11 +778,12 @@ When working on this codebase:
 
 **EdAgent System = Conversational Orchestrator + Computational Backend**
 
-- **Agent** (edagent) - Routes, guides, orchestrates
+- **Agent** (edagent) - Routes, guides, orchestrates via 5-node essay grading chain
 - **Server** (edmcp) - Processes, stores, generates
 - **Communication** - MCP protocol over stdio
-- **Philosophy** - One tool, one job; router-first; state-based workflow
-- **Result** - Scalable, testable, maintainable grading automation
+- **Philosophy** - One tool one job; router-first; hybrid state (DB + agent); linear workflow chains
+- **Essay Grading** - 5 specialized nodes (gather → prepare → inspect → evaluate → generate_reports)
+- **Result** - Scalable, testable, maintainable grading automation with clear phase separation
 
 **Start here:** Router node (`nodes.py:58`) → Understand routing → Explore specialist nodes → See how they call EDMCP tools → Trace data flow through state.
 
