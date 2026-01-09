@@ -1,171 +1,238 @@
-# EdAgent Development Status - January 5, 2026
+# EdAgent Development Status - January 8, 2026
 
 ## Summary
-Successfully completed the refactoring of essay grading from a monolithic 645-line node into a 5-node specialized workflow. Fixed critical bugs during initial testing. Ready for full end-to-end testing.
+Successfully implemented phase-specific tool filtering to enforce proper workflow separation. Fixed critical routing bugs and improved prepare_essays workflow. The agent now correctly follows the 5-node workflow without skipping phases. Ready for full end-to-end testing.
 
 ---
 
-## What We Just Completed
+## What We Completed Today (January 8, 2026)
 
-### 1. **5-Node Workflow Refactor** ✅
-Replaced the single `essay_grading_node` with 5 specialized nodes:
+### 1. **Phase-Specific Tool Filtering** ✅
+**Problem:** Agent had access to ALL grading tools in every phase, causing it to skip workflow steps and call tools prematurely (e.g., calling `evaluate_job` during gather phase).
 
-1. **gather_materials_node** - Collects rubric, question, reading materials, metadata
-2. **prepare_essays_node** - Handles file uploads, KB setup, OCR processing
-3. **inspect_and_scrub_node** - Shows student manifest, removes PII
-4. **evaluate_essays_node** - Queries KB (if needed), calls evaluate_job
-5. **generate_reports_node** - Creates gradebook/feedback, offers email distribution
+**Solution:** Implemented `get_phase_tools(phase)` function in `mcp_tools.py`:
+- **gather phase:** Only gets `create_job_with_materials`, `add_to_knowledge_base`, `convert_pdf_to_text`, `read_text_file`
+- **prepare phase:** Only gets `batch_process_documents`
+- **inspect phase:** Only gets `get_job_statistics`, `scrub_processed_job`
+- **evaluate phase:** Only gets `query_knowledge_base`, `evaluate_job`
+- **report phase:** Only gets `generate_gradebook`, `generate_student_feedback`, `download_reports_locally`
 
-**Key Features:**
-- Each node can return `END` to wait for next user message
-- Phase-aware routing: Router checks `current_phase` and resumes at correct node
-- Completion flags prevent premature advancement
-- Linear chain workflow with human checkpoints
+**Result:** Agent physically cannot call out-of-phase tools. Workflow integrity enforced at code level, not just prompts.
 
-### 2. **MCP Tool Integration** ✅
-Fixed gather_materials_node to use MCP server tools instead of local file utilities:
+### 2. **Graph Routing Fixes** ✅
+**Problem:** Router could route to `gather_materials` to start workflow, but couldn't resume at other phases. Missing edges caused crashes when user uploaded files after gather phase.
 
-- **Before:** Used local `read_text_file` (couldn't handle PDFs)
-- **After:** Uses MCP `convert_pdf_to_text` for reading rubrics/questions
-- Added all MCP grading tools to gather_materials_node
-- Agent can now read PDF rubrics via MCP server
+**Solution:** Added router→phase edges for all 5 nodes in `graph.py`:
+- `router` → `gather_materials` ✅
+- `router` → `prepare_essays` ✅ (NEW)
+- `router` → `inspect_and_scrub` ✅ (NEW)
+- `router` → `evaluate_essays` ✅ (NEW)
+- `router` → `generate_reports` ✅ (NEW)
 
-### 3. **System Prompt Strengthening** ✅
-Made ALL node prompts emphatic that the MCP server does the actual work:
+**Result:** Multi-turn workflow now works correctly. Agent can pause at any phase and resume when user provides more input.
 
-**Added to every node:**
-```
-You are a [phase] COORDINATOR. Your ONLY job is to call MCP server tools -
-you do NOT [grade/process/create reports] yourself.
+### 3. **prepare_essays_node Improvements** ✅
+Fixed multiple issues in the essay preparation phase:
 
-**CRITICAL: YOU ARE A COORDINATOR, NOT A [GRADER/PROCESSOR/WRITER]**
-- The MCP server does ALL the [grading/processing/generation] - you just coordinate
-- NEVER [write evaluations/read essays/create reports] yourself
-- Your job: Call the MCP tools and let the server do the work
-```
+**Issue #1: Ignored Already-Attached Files**
+- **Problem:** When user uploaded essays during gather→prepare transition, agent asked for upload again
+- **Fix:** Updated system prompt to check for `[User attached files: ...]` first before asking
 
-**Result:** Agent cannot attempt to do work itself - MUST use MCP server for everything.
+**Issue #2: Asked for Student Count**
+- **Problem:** Agent asked "how many students?" when requesting essays
+- **Fix:** Added explicit instruction: "DO NOT ask how many students or essays - the OCR will auto-detect this"
 
-### 4. **Bug Fixes During Testing** ✅
+**Issue #3: Missing File Format Info**
+- **Problem:** gather_materials_node didn't mention .txt files were supported
+- **Fix:** Updated to show "PDF, text files (.txt, .md), images (JPG/PNG), ZIP files"
 
-**Bug #1: PDF Reading Validation Error**
-- **Error:** `convert_pdf_to_text` parameter `use_ocr` was receiving `None` instead of boolean
-- **Fix:** Added special handling in `mcp_tools.py`:
-  - Made `use_ocr` optional in schema
-  - Inject default `False` (fast text extraction) if not provided
-- **File:** `/home/tcoop/Work/edagent/edagent/mcp_tools.py` lines 117-139
+### 4. **Error Handling** ✅
+Added try/except blocks to nodes for better error reporting:
+- `prepare_essays_node` - Catches errors during file prep/OCR and reports to user
+- `inspect_and_scrub_node` - Catches errors during student detection/scrubbing
 
-**Bug #2: Route Decision Type Error**
-- **Error:** `'prepare_essays'` - routing failed because node name wasn't in Literal type
-- **Fix:** Updated `route_decision()` return type to include all new node names:
-  - Added: gather_materials, prepare_essays, inspect_and_scrub, evaluate_essays, generate_reports, router
-  - Removed: essay_grading (old node name)
-- **File:** `/home/tcoop/Work/edagent/edagent/nodes.py` lines 1672-1694
+**Result:** When nodes crash, user sees helpful error message instead of generic failure.
+
+### 5. **Cleaner Logs** ✅
+Removed verbose argument dumps from all node tool calls:
+- **Before:** `[GATHER_MATERIALS] Calling tool 'create_job_with_materials' with args: {'rubric': '<2000 char rubric dump>'...}`
+- **After:** `[GATHER_MATERIALS] Calling tool 'create_job_with_materials'`
+
+**Result:** Logs are readable and don't dump massive text blobs.
 
 ---
 
 ## Current Architecture
 
+### **Phase-Specific Tool Access (NEW)**
+Each node is restricted to only the tools it needs:
+
+```
+gather_materials_node:
+  ✓ create_job_with_materials
+  ✓ add_to_knowledge_base
+  ✓ convert_pdf_to_text
+  ✓ read_text_file
+  ✗ batch_process_documents (blocked)
+  ✗ evaluate_job (blocked)
+
+prepare_essays_node:
+  ✓ batch_process_documents
+  ✓ prepare_files_for_grading (local helper)
+  ✗ get_job_statistics (blocked)
+  ✗ scrub_processed_job (blocked)
+
+inspect_and_scrub_node:
+  ✓ get_job_statistics
+  ✓ scrub_processed_job
+  ✗ evaluate_job (blocked)
+
+evaluate_essays_node:
+  ✓ query_knowledge_base
+  ✓ evaluate_job
+  ✗ generate_gradebook (blocked)
+
+generate_reports_node:
+  ✓ generate_gradebook
+  ✓ generate_student_feedback
+  ✓ download_reports_locally
+```
+
+### **Multi-Turn Workflow with Resumption**
+```
+User: "grade essays" → Router → gather_materials
+  ↓ (collects rubric, question, materials)
+  ↓ returns: current_phase="prepare", next_step="END"
+
+User: [uploads essays.pdf] → Router (sees phase="prepare") → prepare_essays
+  ↓ (calls prepare_files_for_grading, batch_process_documents)
+  ↓ returns: current_phase="inspect", next_step="inspect_and_scrub"
+
+Router → inspect_and_scrub
+  ↓ (shows student manifest)
+  ↓ returns: current_phase="inspect", next_step="END" (waits for approval)
+
+User: "yes, looks good" → Router (sees phase="inspect") → inspect_and_scrub
+  ↓ (calls scrub_processed_job)
+  ↓ returns: current_phase="evaluate", next_step="evaluate_essays"
+
+(continue through evaluate and report phases...)
+```
+
 ### **Hybrid State Management**
-- **Agent State (ephemeral):** Workflow progress, current_phase, flags, rubric_text, question_text
+- **Agent State (ephemeral):** Workflow progress, current_phase, flags, rubric_text, question_text, job_id
 - **MCP Database (persistent):** Essays, evaluations, reports - indexed by job_id
 - **Flow:** Agent tracks job_id and phase, MCP server stores all artifacts
 
-### **Phase-Aware Routing**
-```
-User: "essays" → Router → gather_materials (phase: "gather")
-  ↓ (materials_complete = True)
-Advance to phase: "prepare", next_step: "prepare_essays"
-  ↓ (ocr_complete = True)
-Advance to phase: "inspect", next_step: "inspect_and_scrub"
-  ↓ (scrubbing_complete = True)
-Advance to phase: "evaluate", next_step: "evaluate_essays"
-  ↓ (evaluation_complete = True)
-Advance to phase: "report", next_step: "generate_reports"
-  ↓ (report_complete = True)
-Return to router → May route to email_distribution → END
-```
-
 ### **Key Files**
+- `/home/tcoop/Work/edagent/edagent/mcp_tools.py` - Tool filtering with `get_phase_tools()`
 - `/home/tcoop/Work/edagent/edagent/nodes.py` - All 5 nodes + router + route_decision
-- `/home/tcoop/Work/edagent/edagent/graph.py` - Graph wiring with conditional edges
-- `/home/tcoop/Work/edagent/edagent/state.py` - AgentState with 13 new workflow fields
-- `/home/tcoop/Work/edagent/edagent/mcp_tools.py` - MCP tool factory with parameter injection
+- `/home/tcoop/Work/edagent/edagent/graph.py` - Graph wiring with ALL router→phase edges
+- `/home/tcoop/Work/edagent/edagent/state.py` - AgentState with 13 workflow fields
 - `/home/tcoop/Work/edagent/SYSTEM_ARCHITECTURE.md` - Complete architecture documentation
 
 ---
 
 ## Testing Status
 
-### ✅ What Works
-1. Router correctly identifies "essays" intent and routes to gather_materials
-2. gather_materials_node successfully reads PDF rubrics using MCP convert_pdf_to_text
-3. Agent asks questions one at a time (rubric, question, reading materials, format, count)
-4. complete_material_gathering tool correctly sets materials_complete flag
-5. Phase advances from "gather" to "prepare" with next_step: "prepare_essays"
+### ✅ What Works Now (Tested Today)
+1. **gather_materials_node** - Collects rubric, question, reading materials successfully
+2. **Phase-specific tool filtering** - Agent cannot call out-of-phase tools
+3. **Router resumption** - Can resume at prepare/inspect/evaluate/report phases
+4. **prepare_essays_node** - Recognizes already-attached files, processes without asking for count
+5. **Multi-turn workflow** - User can upload files across multiple messages
 
-### ⚠️ What's Not Tested Yet
-1. **prepare_essays_node** - File upload handling, OCR processing, KB setup
-2. **inspect_and_scrub_node** - Student manifest display, scrubbing
-3. **evaluate_essays_node** - KB querying, evaluation
-4. **generate_reports_node** - Report generation, download links
-5. **Full end-to-end flow** - Complete workflow from rubric upload to final reports
+### ⚠️ What's Not Fully Tested Yet
+1. **inspect_and_scrub_node** - Student manifest display, approval flow, scrubbing execution
+2. **evaluate_essays_node** - KB querying, evaluation with rubric
+3. **generate_reports_node** - Report generation, download links
+4. **Full end-to-end flow** - Complete workflow from rubric to final reports
+5. **Error recovery** - What happens if MCP tool fails mid-workflow?
 
-### 🐛 Known Issues (Fixed, Ready for Testing)
-- ✅ PDF reading now works via MCP server
-- ✅ Routing between nodes works with new type annotations
-- ✅ Agent won't attempt to do work itself (coordinator-only prompts)
+### 🐛 Known Issues
+- None currently identified (all previous issues resolved)
+
+---
+
+## Recent Git Commits
+
+**Latest Commit (January 8, 2026):**
+```
+commit 10e6e1bf - feat: implement phase-specific tool filtering and workflow fixes
+  - Added get_phase_tools(phase) for tool access control
+  - Fixed graph routing for workflow resumption
+  - Improved prepare_essays_node file handling
+  - Added error handling to prepare and inspect nodes
+  - Cleaned up logging (removed arg dumps)
+```
+
+**Branch:** refactor
+**Status:** Clean working tree, all changes committed
 
 ---
 
 ## Next Steps
 
-### Immediate (Next Session)
-1. **Test full end-to-end workflow** with sample data:
-   - Upload rubric PDF
-   - Provide question/reading materials (or skip)
-   - Upload 2-3 sample essay PDFs
-   - Verify student detection
-   - Approve scrubbing
-   - Check evaluation runs
-   - Verify reports generate and download
+### Immediate (Next Session - January 9, 2026)
 
-2. **Validate MCP tool calls** at each phase:
-   - prepare_essays: prepare_files_for_grading, add_to_knowledge_base, batch_process_documents
-   - inspect_and_scrub: get_job_statistics, scrub_processed_job
-   - evaluate_essays: query_knowledge_base, evaluate_job
-   - generate_reports: generate_gradebook, generate_student_feedback, download_reports_locally
+**PRIMARY GOAL: Complete End-to-End Test**
+1. Test full workflow with sample data:
+   - Upload rubric (PDF or paste)
+   - Provide essay question
+   - Upload reading materials (test KB integration)
+   - Upload 4-5 sample essays (handwritten PDF - single multi-page file)
+   - **Focus on:** Does scrubbing work? Are names detected? Are reports generated?
 
-3. **Test error handling:**
-   - What if no students detected?
-   - What if MCP tool fails?
-   - What if teacher says "no" at checkpoint?
+2. Fix any issues found in:
+   - `inspect_and_scrub_node` - Most likely to have issues (not yet tested)
+   - `evaluate_essays_node` - KB query and evaluation
+   - `generate_reports_node` - Report generation and download
+
+3. Verify the scrubbing workflow specifically:
+   - Does `get_job_statistics` return student names?
+   - Does the agent present them clearly?
+   - Does `scrub_processed_job` execute correctly?
+   - Are names properly removed from essay text?
 
 ### Short-term (This Week)
-1. Add better progress indicators during long operations
-2. Improve checkpoint presentation (student manifest formatting)
-3. Test email distribution node integration
-4. Add error recovery flows
+1. Test with edge cases:
+   - Essays without names at top (should show as "Unknown Student")
+   - Mixed handwritten and typed essays
+   - ZIP files with multiple PDFs
+   - No reading materials (skip KB entirely)
 
-### Medium-term (This Month)
-1. Test with real classroom data (30+ students)
-2. Optimize RAG context retrieval
-3. Implement test_grading_node (similar to essay workflow)
-4. Add maintenance operations (cleanup, archive)
+2. Improve UX:
+   - Better progress indicators during OCR (can take 1-2 min per essay)
+   - Clearer student manifest formatting
+   - More helpful error messages
+
+3. Test email distribution integration after reports are generated
+
+### Medium-term (Next Week)
+1. Test with real classroom data (12-30 students)
+2. Optimize OCR processing time
+3. Verify RAG context retrieval quality
+4. Test test_grading_node (similar workflow for tests)
 
 ---
 
-## Technical Debt & Cleanup
+## Critical Design Decisions Made
 
-### ✅ Completed Cleanup
-- Deleted old essay_grading_node (645 lines)
-- Removed outdated MD files: CONVERSATION_FLOW_FIX.md, DEVELOPMENT_NOTES.md, REDESIGN_PLAN.md, etc.
-- Updated SYSTEM_ARCHITECTURE.md with 5-node structure
-- Fixed route_decision type annotations
+1. **Phase-specific tool filtering over prompt-only restrictions**
+   - Reason: LLMs can ignore prompts, but cannot call unavailable tools
+   - Result: Workflow integrity is guaranteed by code, not suggestions
 
-### ⚠️ Needs Cleanup
-- PROJECT_PHILOSOPHY.md is outdated (references old single-node structure and deleted files)
-  - **Recommendation:** Delete or fully rewrite to match new 5-node architecture
+2. **Multi-turn workflow with END states**
+   - Reason: Teachers need time to gather materials, approve checkpoints
+   - Result: Workflow can pause/resume naturally across conversation
+
+3. **Agent as coordinator, MCP as processor**
+   - Reason: Separate concerns - agent handles UX, MCP handles heavy lifting
+   - Result: Agent never attempts to grade/process itself
+
+4. **Student count auto-detection**
+   - Reason: OCR automatically detects students, asking is redundant
+   - Result: One less question, smoother UX
 
 ---
 
@@ -176,6 +243,7 @@ Return to router → May route to email_distribution → END
 - **Status:** Running, 17 tools exposed
 - **Connection:** stdio transport
 - **Database:** SQLite at `/home/tcoop/Work/edmcp/ocr_grading.db`
+- **Names CSV:** `/home/tcoop/Work/edmcp/edmcp/data/names/school_names.csv` (for scrubbing)
 
 ### Agent
 - **Location:** `/home/tcoop/Work/edagent`
@@ -183,37 +251,55 @@ Return to router → May route to email_distribution → END
 - **Python:** 3.13 (virtual env at `.venv`)
 - **LLM:** Configurable (currently using grok-beta via X.AI)
 
-### Git Status
-- **Branch:** refactor
-- **Recent commits:**
-  - bb096da: last minute md statements
-  - 07421e4: finished adding email
-  - 0750d32: debug tool call logging
-  - 3084716: simplified email workflow, database-first reports
-
 ---
 
-## Critical Principles (Don't Forget!)
+## What's Working vs. What Needs Testing
 
-1. **Agent is a coordinator, not a doer** - MCP server does ALL processing/grading/generation
-2. **One question at a time** - Never overwhelm teachers with lists
-3. **Human checkpoints** - Verify student manifest before proceeding
-4. **Phase-aware routing** - Workflows can pause and resume across multiple user messages
-5. **Completion flags are critical** - Must set `materials_complete`, `ocr_complete`, etc.
-6. **Hybrid state management** - Workflow in agent, artifacts in MCP database
+| Component | Status | Last Tested | Notes |
+|-----------|--------|-------------|-------|
+| gather_materials_node | ✅ Working | Jan 8, 2026 | Collects all materials successfully |
+| prepare_essays_node | ✅ Working | Jan 8, 2026 | File prep and OCR execution confirmed |
+| inspect_and_scrub_node | ⚠️ Needs Testing | Not tested | Student manifest presentation unknown |
+| evaluate_essays_node | ⚠️ Needs Testing | Not tested | KB query and evaluation untested |
+| generate_reports_node | ⚠️ Needs Testing | Not tested | Report generation untested |
+| Phase tool filtering | ✅ Working | Jan 8, 2026 | Prevents out-of-phase tool calls |
+| Router resumption | ✅ Working | Jan 8, 2026 | Multi-turn workflow confirmed |
+| Error handling | ⚠️ Partial | Jan 8, 2026 | Added to 2 nodes, not tested |
 
 ---
 
 ## Questions for Next Session
 
-1. Should we add more detailed logging to track phase transitions?
-2. Do we need a "restart workflow" command if something goes wrong mid-process?
-3. Should the agent proactively explain what will happen next at each phase?
-4. How should we handle edge cases like "Unknown Student" records?
+1. ~~Should we add phase-specific tool filtering?~~ ✅ Implemented
+2. ~~Should the router support resumption at any phase?~~ ✅ Implemented
+3. How should "Unknown Student" records be handled in the manifest?
+4. Should the agent explain what will happen at each phase transition?
+5. Do we need a "restart workflow" command if something goes wrong?
+6. Should we add time estimates for long operations (OCR, evaluation)?
 
 ---
 
-**Status:** Ready for full end-to-end testing
-**Last Updated:** January 5, 2026 at 19:45 PST
-**Session:** Refactoring complete, bug fixes applied
-**Next Action:** Run complete essay grading workflow with sample data
+## Developer Notes
+
+### If You Need to Debug Phase Issues:
+1. Check logs for `[PHASE_NAME] Iteration X: Calling tool 'tool_name'`
+2. Verify `current_phase` is set correctly in state
+3. Check that `get_phase_tools(phase)` returns expected tools
+4. Look for router debug logs: `[ROUTER DEBUG] Continuing workflow at phase: X → Y`
+
+### If Workflow Gets Stuck:
+1. Check if completion flag was set (`materials_complete`, `ocr_complete`, etc.)
+2. Verify `next_step` is set correctly (should be next phase or "END")
+3. Look for errors in try/except blocks
+4. Check if router has edge defined for target phase
+
+### If Agent Attempts to Do Work Itself:
+- **This should no longer be possible** due to phase-specific tool filtering
+- If it happens, check that node is calling `get_phase_tools()` not `get_grading_tools()`
+
+---
+
+**Status:** Phase separation enforced, ready for end-to-end testing
+**Last Updated:** January 8, 2026 at 19:45 PST
+**Session:** Phase-specific tool filtering and workflow fixes
+**Next Action:** Full end-to-end test with focus on inspect/evaluate/report phases
