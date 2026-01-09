@@ -17,7 +17,7 @@ class AgentState(TypedDict):
 
         rubric_text: Grading rubric text (gathered in gather_materials phase)
         question_text: Essay question/prompt text (optional, gathered in gather_materials phase)
-        reading_materials_paths: List of paths to reading materials (optional, gathered in gather_materials phase)
+        knowledge_base_topic: Topic name if reading materials were added to knowledge base (populated in gather_materials phase)
         context_material: Retrieved context from knowledge base (populated in evaluate phase)
 
         materials_added_to_kb: Flag indicating if reading materials were added to knowledge base
@@ -41,7 +41,7 @@ class AgentState(TypedDict):
     # --- NEW: Gathered materials ---
     rubric_text: str | None
     question_text: str | None
-    reading_materials_paths: list[str] | None
+    knowledge_base_topic: str | None
     context_material: str | None
 
     # --- NEW: Workflow progress flags ---

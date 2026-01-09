@@ -216,7 +216,6 @@ If this is the FIRST message (current_phase is None), present this overview:
 **Required:**
 - **A grading rubric** - This tells me what criteria to use when evaluating the essays
 - **The student essays** - I'll use OCR to extract the text, so handwritten or typed both work
-- **Format info** - Whether they're handwritten or typed helps me optimize the text extraction
 
 **Optional (but helpful for better grading):**
 - **The essay question or prompt** - If students were answering a specific question, this gives me important context
@@ -233,117 +232,126 @@ Let's start: Do you have a grading rubric? You can upload it with 📎 or paste 
 
 **Step 1: Rubric (REQUIRED)**
 - If overview was just presented, wait for rubric upload/paste
-- If they upload a PDF file: Call convert_pdf_to_text(file_path=<path>) to read it
-- If they paste text: Store it directly
+- If they upload a file:
+  - **PDF file (.pdf)**: Call convert_pdf_to_text(file_path=<path>) → Extract response["text_content"]
+  - **Text file (.txt, .md)**: Call read_text_file(file_path=<path>) → Extract response["text_content"]
+  - The text_content is the rubric text to use
+- If they paste text: Use it directly as the rubric text
 - When received, acknowledge briefly and move to Step 2
 
 **Step 2: Essay Question/Prompt (OPTIONAL)**
 - Ask: "Perfect! Was there a specific essay question or prompt the students had to answer? If so, you can share it here or upload it with 📎"
-- If YES and they upload PDF: Call convert_pdf_to_text(file_path=<path>)
-- If YES and they paste: Store it
-- If NO: "No problem! Moving on..."
+- If YES and they upload a file:
+  - **PDF file (.pdf)**: Call convert_pdf_to_text(file_path=<path>) → Extract response["text_content"]
+  - **Text file (.txt, .md)**: Call read_text_file(file_path=<path>) → Extract response["text_content"]
+  - The text_content is the question text to use
+- If YES and they paste: Use it directly as the question text
+- If NO: "No problem! Moving on..." (question_text will be None/omitted)
 - Move to Step 3
 
-**Step 3: Reading Materials (OPTIONAL)**
+**Step 3: Reading Materials / Context (OPTIONAL)**
 - Ask: "Did students use any specific reading materials, textbook chapters, articles, or lecture notes for these essays?"
 - If YES: "Great! Can you upload those materials now? I'll add them to my knowledge base to provide context-aware grading. Just use the 📎 button."
 - **WAIT for upload - DO NOT proceed until you have the files**
 - **NEVER search online** - only use what teacher uploads
-- When received: Store the file paths (you'll process them in the next phase)
+- When files are received:
+  - **STEP 3A:** Create a simple topic name (e.g., "WR121_Essays_Context" or "Frost_Poetry_Materials")
+  - **STEP 3B:** **IMMEDIATELY** call: add_to_knowledge_base(file_paths=[<all_uploaded_paths>], topic=<topic_name>)
+  - **STEP 3C:** Wait for success response from add_to_knowledge_base
+  - **STEP 3D:** Store the topic name - you MUST pass it to create_job_with_materials later
+  - **CRITICAL:** You MUST call add_to_knowledge_base when context materials are provided - do NOT skip this!
 - If NO: "No problem! I'll grade based on the rubric alone."
-- Move to Step 4
-
-**Step 4: Format & Student Count (REQUIRED)**
-- Ask: "Are the essays handwritten or typed? This helps me optimize text extraction."
-- Store the answer
-- Then ask: "How many student essays are you grading?"
-- Store the number
 - Move to completion
 
 **TOOLS AVAILABLE:**
-- convert_pdf_to_text: Read PDF files (rubrics, questions, etc.)
+- convert_pdf_to_text: Read PDF files - returns text_content
+- read_text_file: Read plain text files (.txt, .md) - returns text_content
 - convert_image_to_pdf: Convert images to PDF format
+- add_to_knowledge_base: Add context materials to RAG (reading materials, textbooks, etc.)
 
 **FILE HANDLING:**
 When files are attached, you'll see: "[User attached files: /path1, /path2...]"
-- For rubric/question PDFs: Use convert_pdf_to_text(file_path=<path>) to read them
-- For rubric/question images: These will be handled by convert_pdf_to_text as well
-- For reading materials: Just store the paths - you'll process them in prepare_essays phase
-- For essays: Wait until Step 4 is complete, then signal completion
-- **CRITICAL**: ALL file reading MUST use MCP tools - this is the core purpose of the agent
+- For rubric/question files:
+  - **If .pdf**: Use convert_pdf_to_text(file_path=<path>)
+  - **If .txt or .md**: Use read_text_file(file_path=<path>)
+  - Both return text_content in the response
+- For reading materials: Use add_to_knowledge_base(file_paths=[...], topic=<topic_name>)
+- **CRITICAL**: Choose the correct tool based on file extension - ALL file processing MUST use MCP tools
 
 **STATE UPDATES:**
 As you collect materials, update the state:
 - rubric_text: Store rubric content
 - question_text: Store question content (or None)
-- reading_materials_paths: Store list of reading material paths (or empty list)
-- essay_format: Store "handwritten" or "typed"
-- student_count: Store expected number of students
+- knowledge_base_topic: Store the topic name used for add_to_knowledge_base (or None if no materials)
 
 **EXIT CONDITION:**
 Once you have:
-- ✓ Rubric
+- ✓ Rubric (extracted text)
 - ✓ Question (or confirmed not needed)
-- ✓ Reading materials (or confirmed not needed)
-- ✓ Essay format
-- ✓ Student count
+- ✓ Reading materials processed:
+  - If materials were provided: add_to_knowledge_base was called AND topic name is stored
+  - If not provided: No action needed
 
-**CRITICAL:** Call the `complete_material_gathering` tool with ALL gathered materials:
+**CRITICAL:** Call the `create_job_with_materials` MCP tool with ALL gathered materials:
+
+**PRE-FLIGHT CHECK before calling create_job_with_materials:**
+1. Do I have rubric text? (Required)
+2. If user uploaded context materials, did I call add_to_knowledge_base? (If not, STOP and call it now!)
+3. Do I have the topic name if materials were added? (Required if Step 2 was yes)
+
+**IMPORTANT - How to handle optional parameters:**
+- If question_text was provided: Include it as a string
+- If question_text was NOT provided: OMIT the parameter entirely (do not pass "None" as a string!)
+
+**Example when question AND context are provided:**
 ```
-complete_material_gathering(
-    rubric_text="<the rubric text>",
-    question_text="<the question>" or None,
-    reading_materials_paths=["<path1>", "<path2>"] or None,
-    essay_format="handwritten" or "typed",
-    student_count=<number>
+create_job_with_materials(
+    job_name="WR121_Essays",
+    rubric="<the rubric text>",
+    question_text="Analyze themes in Frost's poetry",
+    knowledge_base_topic="WR121_Essays"  # Topic used when adding to knowledge base
 )
 ```
 
-This signals that gathering is complete and you're ready to move to essay preparation.
+**Example when only rubric is provided:**
+```
+create_job_with_materials(
+    job_name="WR121_Essays",
+    rubric="<the rubric text>"
+)
+```
 
-**IMPORTANT:**
+**CRITICAL:** If you called add_to_knowledge_base earlier, you MUST pass the same topic name to knowledge_base_topic parameter!
+
+This creates a job in the edmcp database with all materials and returns a job_id.
+
+**IMPORTANT NOTES:**
+- The MCP server (edmcp) handles ALL data storage:
+  - Rubric/question → SQLite database via create_job_with_materials
+  - Reading materials → Knowledge base (RAG) via add_to_knowledge_base **YOU MUST CALL THIS!**
+- You are ONLY a coordinator - the MCP server does the actual storage
+- After calling create_job_with_materials, extract the job_id from the response
 - Be encouraging and patient
 - Celebrate progress: "Great! Got the rubric. Now let's talk about..."
 - Keep responses SHORT and CONTEXTUAL
 - NEVER repeat the overview after the first message
-- ALWAYS call complete_material_gathering when all materials are collected"""
+
+**CRITICAL SEQUENCE WHEN CONTEXT MATERIALS ARE PROVIDED:**
+1. User uploads context files → You see file paths
+2. **IMMEDIATELY** call add_to_knowledge_base(file_paths=[...], topic="...")
+3. Wait for success response
+4. Store the topic name
+5. THEN call create_job_with_materials with knowledge_base_topic parameter
+
+**FAILURE MODE TO AVOID:**
+❌ BAD: User uploads context → You skip add_to_knowledge_base → Context is LOST
+✅ GOOD: User uploads context → You call add_to_knowledge_base → Store topic → Pass to create_job_with_materials"""
 
     # Get MCP tools for file conversion and processing
-    from edagent.mcp_tools import get_grading_tools
-    from langchain_core.tools import tool as tool_decorator
+    from edagent.mcp_tools import get_phase_tools
 
-    # Add a tool for the agent to signal completion and store gathered materials
-    @tool_decorator
-    def complete_material_gathering(
-        rubric_text: str,
-        question_text: str | None,
-        reading_materials_paths: list[str] | None,
-        essay_format: str,
-        student_count: int,
-    ) -> str:
-        """Signal that all materials have been gathered and store them in state.
-
-        Args:
-            rubric_text: The grading rubric text
-            question_text: The essay question/prompt (or None if not provided)
-            reading_materials_paths: List of paths to reading materials (or None/empty if not provided)
-            essay_format: Either "handwritten" or "typed"
-            student_count: Expected number of students
-
-        Returns:
-            Confirmation message
-        """
-        gathered_state["rubric_text"] = rubric_text
-        gathered_state["question_text"] = question_text
-        gathered_state["reading_materials_paths"] = reading_materials_paths or []
-        gathered_state["essay_format"] = essay_format
-        gathered_state["student_count"] = student_count
-        gathered_state["materials_complete"] = True  # CRITICAL: Signal completion!
-        return f"✓ Materials gathered: Rubric, {student_count} {essay_format} essays. Ready to proceed to essay preparation."
-
-    # Get MCP tools and add completion tool
-    tools = await get_grading_tools()
-    tools.append(complete_material_gathering)
+    # Get MCP tools for gather phase only
+    tools = await get_phase_tools("gather")
 
     llm = get_llm().bind_tools(tools)
 
@@ -353,13 +361,12 @@ This signals that gathering is complete and you're ready to move to essay prepar
     max_iterations = 10
     iteration = 0
 
-    # Track what we've gathered
+    # Track what we've gathered and the job_id from create_job_with_materials
     gathered_state = {
+        "job_id": state.get("job_id"),  # Track job_id from create_job_with_materials
         "rubric_text": state.get("rubric_text"),
         "question_text": state.get("question_text"),
-        "reading_materials_paths": state.get("reading_materials_paths") or [],
-        "essay_format": state.get("essay_format"),
-        "student_count": state.get("student_count"),
+        "knowledge_base_topic": state.get("knowledge_base_topic"),  # Topic name if materials were added to KB
     }
 
     while iteration < max_iterations:
@@ -387,6 +394,43 @@ This signals that gathering is complete and you're ready to move to essay prepar
             if matching_tool:
                 try:
                     result = await matching_tool.ainvoke(tool_args)
+
+                    # Special handling for add_to_knowledge_base - track topic
+                    if tool_name == "add_to_knowledge_base":
+                        import json
+                        try:
+                            result_dict = json.loads(result) if isinstance(result, str) else result
+                            print(f"[GATHER_MATERIALS] add_to_knowledge_base result: {result_dict}", flush=True)
+
+                            if result_dict.get("status") == "success":
+                                topic = result_dict.get("topic")
+                                gathered_state["knowledge_base_topic"] = topic
+                                print(f"[GATHER_MATERIALS] Context materials added to knowledge base. Topic: {topic}", flush=True)
+                            else:
+                                print(f"[GATHER_MATERIALS] ERROR: add_to_knowledge_base failed: {result_dict}", flush=True)
+                        except Exception as e:
+                            print(f"[GATHER_MATERIALS] ERROR: Failed to parse add_to_knowledge_base result: {e}", flush=True)
+                            print(f"[GATHER_MATERIALS] Raw result: {result}", flush=True)
+
+                    # Special handling for create_job_with_materials - extract job_id
+                    if tool_name == "create_job_with_materials":
+                        import json
+                        try:
+                            result_dict = json.loads(result) if isinstance(result, str) else result
+                            print(f"[GATHER_MATERIALS] create_job_with_materials result: {result_dict}", flush=True)
+
+                            if result_dict.get("status") == "success":
+                                job_id = result_dict.get("job_id")
+                                gathered_state["job_id"] = job_id
+                                gathered_state["materials_complete"] = True  # Signal completion
+                                print(f"[GATHER_MATERIALS] Successfully extracted job_id: {job_id}", flush=True)
+                            else:
+                                print(f"[GATHER_MATERIALS] ERROR: create_job_with_materials failed: {result_dict}", flush=True)
+                        except Exception as e:
+                            # If parsing fails, log the error
+                            print(f"[GATHER_MATERIALS] ERROR: Failed to parse create_job_with_materials result: {e}", flush=True)
+                            print(f"[GATHER_MATERIALS] Raw result: {result}", flush=True)
+
                     messages.append(
                         ToolMessage(
                             content=str(result),
@@ -500,19 +544,18 @@ When files are attached, you'll see: "[User attached files: /path1, /path2...]"
   - Set materials_added_to_kb = False
 
 **Task 4: Run OCR Processing**
-- Create a descriptive job_name from available context:
-  - If question_text exists: derive from question (e.g., "Frost_Poetry_Analysis")
-  - Otherwise: use format like "Essays_<current_date>" (e.g., "Essays_20260105")
-  - Keep it short, alphanumeric with underscores only
-- Call: batch_process_documents(directory_path=<clean_pdf_directory_from_prepare_files>, job_name=<created_job_name>)
+- **CRITICAL**: Use the job_id from state (created by create_job_with_materials in gather phase)
+- Call: batch_process_documents(directory_path=<clean_pdf_directory_from_prepare_files>, job_id=<job_id_from_state>)
   - Use the directory_path from prepare_files_for_grading
+  - Use the job_id from state (NOT job_name - the job already exists!)
   - **CRITICAL**: Do NOT pass the dpi parameter - omit it entirely
   - Returns: {{"job_id": "job_...", "total_documents": X, "students_detected": Y, "summary": {{...}}}}
+  - The returned job_id should match the one from state
 - Explain results based on the summary:
   - If mostly Fast Text Extraction: "Great! Processed your typed essays using fast text extraction. Found X student records..."
   - If mostly OCR: "Processed your essays using OCR (scanned documents). Found X student records..."
   - If Mixed: "Processed X files: Y via fast extraction, Z via OCR. Found Total student records..."
-- Store the job_id for next phase
+- Confirm the job_id matches state
 
 **Task 5: Signal Completion**
 - Call: complete_preparation(job_id=<job_id>, clean_directory_path=<path>, materials_added_to_kb=<bool>)
@@ -537,37 +580,38 @@ If ANY tool fails:
 **TOOLS AVAILABLE:**
 - prepare_files_for_grading(file_paths)
 - add_to_knowledge_base(file_paths, topic)
-- batch_process_documents(directory_path, job_name)
+- batch_process_documents(directory_path, job_id)  # job_id from state, NOT job_name
 - complete_preparation (signals completion)
 
 Always be encouraging: "Great work! Essays are processed. Let's verify the student list next..."
 """
 
     # Prepare context-aware prompt
-    rubric_status = "✓ Provided" if state.get("rubric_text") else "❌ Missing"
+    job_id = state.get("job_id") or "NOT_SET"
+    rubric_status = "✓ Stored in DB" if state.get("job_id") else "❌ Missing"
     question_status = state.get("question_text") or "Not provided (optional)"
     reading_materials_status = (
         f"{len(state.get('reading_materials_paths', []))} files"
         if state.get("reading_materials_paths")
         else "None (optional)"
     )
-    essay_format = state.get("essay_format") or "Unknown"
-    student_count = state.get("student_count") or "Unknown"
 
-    system_prompt = system_prompt.format(
-        rubric_status=rubric_status,
-        question_status=question_status,
-        reading_materials_status=reading_materials_status,
-        essay_format=essay_format,
-        student_count=student_count,
-    )
+    # Add job_id to system prompt context
+    system_prompt = f"""
+**CURRENT STATE:**
+- Job ID: {job_id}
+- Rubric: {rubric_status}
+- Question: {question_status}
+- Reading Materials: {reading_materials_status}
+
+""" + system_prompt
 
     # Get MCP tools
-    from edagent.mcp_tools import get_grading_tools
+    from edagent.mcp_tools import get_phase_tools
     from edagent.file_utils import prepare_files_for_grading
     from langchain_core.tools import tool as tool_decorator
 
-    tools = await get_grading_tools()
+    tools = await get_phase_tools("prepare")
 
     # Add file preparation utility
     tools.append(prepare_files_for_grading)
@@ -782,10 +826,10 @@ Always be helpful: "This checkpoint helps ensure all students were detected corr
     )
 
     # Get MCP tools
-    from edagent.mcp_tools import get_grading_tools
+    from edagent.mcp_tools import get_phase_tools
     from langchain_core.tools import tool as tool_decorator
 
-    tools = await get_grading_tools()
+    tools = await get_phase_tools("inspect")
 
     # Add completion signal tool
     inspection_state = {"scrubbing_complete": False}
@@ -930,12 +974,13 @@ async def evaluate_essays_node(state: AgentState) -> AgentState:
 **Task 2: Grade Essays (MCP SERVER DOES THIS, NOT YOU)**
 - **CRITICAL**: You MUST call evaluate_job - do NOT attempt to grade essays yourself
 - **CRITICAL**: Do NOT read essay content, write feedback, or assign scores - that's the MCP server's job
+- **CRITICAL**: The rubric is already stored in the database - do NOT pass it!
 - Call: evaluate_job(
     job_id="{job_id}",
-    rubric=<rubric_text_from_state>,
     context_material=<from_KB_or_empty>,
     system_instructions=<question_text_from_state_or_None>
   )
+- NOTE: Rubric parameter is omitted - it will be looked up from database using job_id
 - **CRITICAL**: Do NOT pass null/None for optional parameters - omit them entirely if not needed
 - **NOTE**: The MCP server does the actual grading. This may take several minutes for large batches (e.g., 15 essays = 3-5 minutes)
 - Explain to teacher: "Sending essays to the grading system with your rubric... This may take a few minutes for {student_count} students."
@@ -963,12 +1008,12 @@ If ANY tool fails:
 **MCP TOOL PARAMETER RULES:**
 - NEVER pass null/None for optional parameters
 - If optional parameter is not needed, OMIT the key entirely
-- Example CORRECT: evaluate_job(job_id="job_123", rubric="...", context_material="")
-- Example WRONG: evaluate_job(job_id="job_123", rubric="...", context_material="", system_instructions=null)
+- Example CORRECT: evaluate_job(job_id="job_123", context_material="")
+- Example WRONG: evaluate_job(job_id="job_123", context_material="", system_instructions=null)
 
 **TOOLS AVAILABLE:**
 - query_knowledge_base(query, topic) - Optional, only if materials_added_to_kb is True
-- evaluate_job(job_id, rubric, context_material, system_instructions) - Required
+- evaluate_job(job_id, context_material, system_instructions) - Required (rubric is in DB)
 - complete_evaluation - Signals completion
 
 Always be patient: "Evaluation is running... This is the core grading step where I apply your rubric to each essay."
@@ -990,10 +1035,10 @@ Always be patient: "Evaluation is running... This is the core grading step where
     )
 
     # Get MCP tools
-    from edagent.mcp_tools import get_grading_tools
+    from edagent.mcp_tools import get_phase_tools
     from langchain_core.tools import tool as tool_decorator
 
-    tools = await get_grading_tools()
+    tools = await get_phase_tools("evaluate")
 
     # Add completion signal tool
     evaluation_state = {
@@ -1206,10 +1251,10 @@ Always be celebratory: "Congratulations! All essays have been graded and reports
     system_prompt = system_prompt.format(job_id=job_id)
 
     # Get MCP tools
-    from edagent.mcp_tools import get_grading_tools
+    from edagent.mcp_tools import get_phase_tools
     from langchain_core.tools import tool as tool_decorator
 
-    tools = await get_grading_tools()
+    tools = await get_phase_tools("report")
 
     # Add routing control tool
     routing_state = {"next_step": None, "job_id": None, "workflow_complete": False}

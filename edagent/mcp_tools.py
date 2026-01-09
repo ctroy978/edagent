@@ -173,8 +173,10 @@ async def get_grading_tools() -> List[StructuredTool]:
     all_tools = await get_mcp_tools()
     # Include ALL tools needed for complete grading pipeline (excluding email tools)
     grading_keywords = [
+        "create_job",  # For creating jobs with materials
         "batch_process",
         "extract_text",
+        "read_text",  # For reading .txt files
         "get_job_statistics",
         "scrub_processed_job",
         "normalize_processed_job",
@@ -218,4 +220,64 @@ async def get_email_tools() -> List[StructuredTool]:
         tool
         for tool in all_tools
         if any(keyword in tool.name.lower() for keyword in email_keywords)
+    ]
+
+
+async def get_phase_tools(phase: str) -> List[StructuredTool]:
+    """Get tools for a specific workflow phase.
+
+    This function enforces phase separation by only returning tools
+    allowed for each phase of the essay grading workflow.
+
+    Args:
+        phase: One of 'gather', 'prepare', 'inspect', 'evaluate', 'report'
+
+    Returns:
+        Filtered list of tools for that phase only
+
+    Raises:
+        ValueError: If invalid phase name provided
+    """
+    # Define phase-to-tool mappings
+    phase_tool_map = {
+        "gather": [
+            "create_job_with_materials",  # Create job and store materials in DB
+            "add_to_knowledge_base",      # Add reading materials to RAG
+            "convert_pdf_to_text",        # Read PDF rubrics/questions
+            "read_text_file",             # Read .txt rubrics/questions
+        ],
+        "prepare": [
+            "batch_process_documents",    # OCR processing of essays
+            # Note: prepare_files_for_grading is added separately (not from MCP)
+        ],
+        "inspect": [
+            "get_job_statistics",         # Retrieve student manifest
+            "scrub_processed_job",        # Remove PII from essays
+        ],
+        "evaluate": [
+            "query_knowledge_base",       # Retrieve context from RAG
+            "evaluate_job",               # Grade essays with rubric
+        ],
+        "report": [
+            "generate_gradebook",         # Create CSV gradebook
+            "generate_student_feedback",  # Create individual PDF reports
+            "download_reports_locally",   # Download reports from DB to temp files
+        ],
+    }
+
+    # Validate phase
+    if phase not in phase_tool_map:
+        raise ValueError(
+            f"Invalid phase '{phase}'. Must be one of: {', '.join(phase_tool_map.keys())}"
+        )
+
+    # Get all tools from MCP server
+    all_tools = await get_mcp_tools()
+
+    # Filter to only tools allowed for this phase
+    allowed_keywords = phase_tool_map[phase]
+    return [
+        tool
+        for tool in all_tools
+        if any(keyword in tool.name.lower() for keyword in allowed_keywords)
     ]
