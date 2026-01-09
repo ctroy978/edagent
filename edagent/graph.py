@@ -57,6 +57,10 @@ def create_graph() -> StateGraph:
         route_decision,
         {
             "gather_materials": "gather_materials",  # Start of 5-node essay grading chain
+            "prepare_essays": "prepare_essays",      # Resume essay grading workflow
+            "inspect_and_scrub": "inspect_and_scrub", # Resume essay grading workflow
+            "evaluate_essays": "evaluate_essays",    # Resume essay grading workflow
+            "generate_reports": "generate_reports",  # Resume essay grading workflow
             "test_grading": "test_grading",
             "general": "general",
             "email_distribution": "email_distribution",

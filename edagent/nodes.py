@@ -221,8 +221,8 @@ If this is the FIRST message (current_phase is None), present this overview:
 - **The essay question or prompt** - If students were answering a specific question, this gives me important context
 - **Reading materials or lecture notes** - If students were supposed to reference specific sources, I can use them to check accuracy and provide context-aware grading
 
-**Supported file formats:** PDF, images (JPG/PNG), ZIP files
-**Note:** Google Docs shortcuts (.gdoc) and Word documents (.docx) are not supported—please convert/export to PDF first.
+**Supported file formats:** PDF, text files (.txt, .md), images (JPG/PNG), ZIP files
+**Note:** Google Docs shortcuts (.gdoc) and Word documents (.docx) are not supported—please convert/export to PDF or .txt first.
 
 You don't have to give me all this at once! Let me help you upload what you need, one piece at a time.
 
@@ -387,7 +387,7 @@ This creates a job in the edmcp database with all materials and returns a job_id
             tool_name = tool_call["name"]
             tool_args = tool_call["args"]
 
-            print(f"[GATHER_MATERIALS] Iteration {iteration}: Calling tool '{tool_name}' with args: {tool_args}", flush=True)
+            print(f"[GATHER_MATERIALS] Iteration {iteration}: Calling tool '{tool_name}'", flush=True)
 
             # Find and execute the tool
             matching_tool = next((t for t in tools if t.name == tool_name), None)
@@ -476,254 +476,223 @@ This creates a job in the edmcp database with all materials and returns a job_id
         }
 
 
-# --- NEW: Prepare Essays Node (Phase 1 continued + 2 + 3) ---
+# --- NEW: Prepare Essays Node (Phase 2) ---
 async def prepare_essays_node(state: AgentState) -> AgentState:
-    """Prepare essays node - handles file uploads, knowledge base, and OCR processing.
+    """Prepare essays node - handles essay file uploads and OCR processing.
 
     This node:
     1. Asks user to upload essays
     2. Prepares files (handles ZIP, images, PDFs)
-    3. Adds reading materials to knowledge base (if provided)
-    4. Runs OCR via batch_process_documents
-    5. Returns job_id and moves to inspection phase
+    3. Runs OCR via batch_process_documents
+    4. Moves to inspection phase
 
     Args:
-        state: Current agent state with gathered materials
+        state: Current agent state with job_id from gather phase
 
     Returns:
-        Updated state with job_id and OCR completion status
+        Updated state with OCR completion status
     """
-    system_prompt = """You are an essay preparation coordinator. Your ONLY job is to call MCP server tools - you do NOT process essays yourself.
+    try:
+        system_prompt = """You are an essay preparation coordinator. Your job is to get the student essays uploaded and processed with OCR.
 
 **CRITICAL: YOU ARE A COORDINATOR, NOT A PROCESSOR**
 - The MCP server does ALL file processing and OCR - you just coordinate
 - NEVER attempt to read, extract, or process essay content yourself
-- Your job: Call the MCP tools to prepare and process files
+- Your job: Call the tools to prepare and process files
 
 **CONTEXT FROM PREVIOUS PHASE:**
-You already have from the teacher:
-- Rubric text: {rubric_status}
-- Essay question: {question_status}
-- Reading materials: {reading_materials_status}
-- Essay format: {essay_format}
-- Expected student count: {student_count}
+The teacher has already provided:
+- ✓ Rubric (stored in database under job_id: {job_id})
+- ✓ Essay question (if provided)
+- ✓ Reading materials (if provided - already in knowledge base)
+
+Now you need to get the STUDENT ESSAYS uploaded and processed.
 
 **YOUR TASKS (IN ORDER):**
 
-**Task 1: Ask for Essay Upload**
-- Use format-appropriate guidance based on essay_format:
-  - **Handwritten**: "Perfect! Now I'm ready for the student essays. Please upload them using 📎. Handwritten essays are typically scanned as one multi-page PDF. I accept PDFs, Images (JPG/PNG), or ZIP files. I'll convert images automatically!"
-  - **Typed**: "Perfect! Now I'm ready for the student essays. Please upload them using 📎. For typed essays, you can upload individual PDFs or a ZIP file containing all essays. I accept PDFs, Images (JPG/PNG), or ZIP files."
-- **IMPORTANT**: Mention that Google Docs (.gdoc) and Word documents (.docx) are NOT supported - they must export/download as PDF first
+**Task 1: Check for Uploaded Essays**
+- **FIRST**: Check the latest message for file attachments
+- If you see "[User attached files: /path1, /path2...]" → SKIP to Task 2 immediately
+- If NO files attached yet:
+  - Ask: "Great! Now I'm ready for the student essays. Please upload them using 📎"
+  - Mention: "I accept PDFs, Images (JPG/PNG), or ZIP files containing essays"
+  - **IMPORTANT**: Warn that Google Docs (.gdoc) and Word documents (.docx) are NOT supported - they must export as PDF first
+  - **DO NOT ask how many students or essays** - the OCR will auto-detect this
+  - STOP and wait for user to upload
 
 **Task 2: Handle File Uploads**
-When files are attached, you'll see: "[User attached files: /path1, /path2...]"
+You will see: "[User attached files: /path1, /path2...]" in the message
 
-- Call: prepare_files_for_grading(file_paths=[...])
-  - This handles PDFs, ZIPs (auto-extracts), images (converts to PDF)
-  - Returns: {{"directory_path": "/tmp/...", "warnings": [...]}}
-- **CRITICAL - CHECK WARNINGS**:
+- **Step 2A**: Call prepare_files_for_grading(file_paths=[...])
+  - This local helper handles PDFs, ZIPs (auto-extracts), images (converts to PDF)
+  - Returns JSON: {{"directory_path": "/tmp/...", "file_count": X, "warnings": [...]}}
+
+- **Step 2B: CHECK WARNINGS**
   - Parse the JSON response
-  - If warnings list is NOT empty, report to user immediately:
-    - "I couldn't process these files: [list warnings]"
+  - If warnings list is NOT empty:
+    - Report to user: "I couldn't process these files: [list warnings]"
     - Explain how to fix (export Google Docs as PDF, etc.)
     - Ask if they want to upload corrected files or proceed
-  - Only continue if warnings are empty OR user confirms to proceed
-- Store the directory_path for OCR
+  - Only continue to Task 3 if warnings are empty OR user confirms to proceed
 
-**Task 3: Add Reading Materials to Knowledge Base (CONDITIONAL)**
-- If reading_materials_paths is NOT empty:
-  - Create a topic name from the question text (if available) or use "general_essays"
-  - Example: question_text="Analyze Frost poetry" → topic="frost_poetry_essays"
-  - Example: no question → topic="general_essays"
-  - Call: add_to_knowledge_base(file_paths=reading_materials_paths, topic=<derived_topic>)
-  - Confirm: "Great! I've added the reading materials to my knowledge base for context-aware grading."
-  - Set materials_added_to_kb = True
-- If reading_materials_paths IS empty:
-  - Skip this step
-  - Set materials_added_to_kb = False
+- **Step 2C**: Store the directory_path from the response for next task
 
-**Task 4: Run OCR Processing**
-- **CRITICAL**: Use the job_id from state (created by create_job_with_materials in gather phase)
-- Call: batch_process_documents(directory_path=<clean_pdf_directory_from_prepare_files>, job_id=<job_id_from_state>)
-  - Use the directory_path from prepare_files_for_grading
-  - Use the job_id from state (NOT job_name - the job already exists!)
-  - **CRITICAL**: Do NOT pass the dpi parameter - omit it entirely
+**Task 3: Run OCR Processing**
+- **CRITICAL**: Use the job_id from state (created in gather phase): {job_id}
+- Call: batch_process_documents(directory_path=<from_prepare_files>, job_id="{job_id}")
+  - Use the directory_path from prepare_files_for_grading response
+  - Use the job_id from state (the job already exists in database!)
+  - **CRITICAL**: Do NOT pass dpi parameter - omit it entirely
   - Returns: {{"job_id": "job_...", "total_documents": X, "students_detected": Y, "summary": {{...}}}}
-  - The returned job_id should match the one from state
-- Explain results based on the summary:
-  - If mostly Fast Text Extraction: "Great! Processed your typed essays using fast text extraction. Found X student records..."
-  - If mostly OCR: "Processed your essays using OCR (scanned documents). Found X student records..."
-  - If Mixed: "Processed X files: Y via fast extraction, Z via OCR. Found Total student records..."
-- Confirm the job_id matches state
 
-**Task 5: Signal Completion**
-- Call: complete_preparation(job_id=<job_id>, clean_directory_path=<path>, materials_added_to_kb=<bool>)
+- **Explain results** based on the summary:
+  - "Processed X essays and found Y student records"
+  - Mention if OCR or fast text extraction was used
+
+**Task 4: Signal Completion**
+- Call: complete_preparation(job_id="{job_id}", clean_directory_path=<path>)
 - This signals you're ready to move to inspection phase
 
 **CRITICAL ERROR HANDLING:**
 If ANY tool fails:
 1. STOP immediately
-2. Report error clearly: "I encountered an error while [action]: [error message]"
+2. Report error: "I encountered an error while [action]: [error message]"
 3. Suggest fixes:
    - File issues: "Try re-uploading or checking file format"
    - OCR issues: "Files might be corrupted or password-protected"
 4. DO NOT continue to next task
-5. All grading MUST go through MCP server - no workarounds
-
-**MCP TOOL PARAMETER RULES:**
-- NEVER pass null/None for optional parameters
-- If optional and you want default, OMIT the key entirely
-- Example CORRECT: batch_process_documents(directory_path="/tmp", job_name="Test")
-- Example WRONG: batch_process_documents(directory_path="/tmp", job_name="Test", dpi=null)
 
 **TOOLS AVAILABLE:**
-- prepare_files_for_grading(file_paths)
-- add_to_knowledge_base(file_paths, topic)
-- batch_process_documents(directory_path, job_id)  # job_id from state, NOT job_name
-- complete_preparation (signals completion)
+- prepare_files_for_grading(file_paths) - Local helper to stage files
+- batch_process_documents(directory_path, job_id) - MCP tool to extract text
+- complete_preparation(job_id, clean_directory_path) - Signal completion
 
-Always be encouraging: "Great work! Essays are processed. Let's verify the student list next..."
+Always be encouraging: "Great! Essays are processed. Let's verify the student list next..."
 """
 
-    # Prepare context-aware prompt
-    job_id = state.get("job_id") or "NOT_SET"
-    rubric_status = "✓ Stored in DB" if state.get("job_id") else "❌ Missing"
-    question_status = state.get("question_text") or "Not provided (optional)"
-    reading_materials_status = (
-        f"{len(state.get('reading_materials_paths', []))} files"
-        if state.get("reading_materials_paths")
-        else "None (optional)"
-    )
+        # Prepare context-aware prompt with job_id
+        job_id = state.get("job_id") or "NOT_SET"
 
-    # Add job_id to system prompt context
-    system_prompt = f"""
-**CURRENT STATE:**
-- Job ID: {job_id}
-- Rubric: {rubric_status}
-- Question: {question_status}
-- Reading Materials: {reading_materials_status}
+        print(f"[PREPARE_ESSAYS] Starting prepare phase. Job ID: {job_id}", flush=True)
 
-""" + system_prompt
+        system_prompt = system_prompt.format(job_id=job_id)
 
-    # Get MCP tools
-    from edagent.mcp_tools import get_phase_tools
-    from edagent.file_utils import prepare_files_for_grading
-    from langchain_core.tools import tool as tool_decorator
+        # Get MCP tools
+        from edagent.mcp_tools import get_phase_tools
+        from edagent.file_utils import prepare_files_for_grading
+        from langchain_core.tools import tool as tool_decorator
 
-    tools = await get_phase_tools("prepare")
+        print(f"[PREPARE_ESSAYS] Getting phase tools for 'prepare'", flush=True)
+        tools = await get_phase_tools("prepare")
+        print(f"[PREPARE_ESSAYS] Got {len(tools)} MCP tools", flush=True)
 
-    # Add file preparation utility
-    tools.append(prepare_files_for_grading)
+        # Add file preparation utility
+        tools.append(prepare_files_for_grading)
 
-    # Add completion signal tool
-    preparation_state = {
-        "job_id": None,
-        "clean_directory_path": None,
-        "materials_added_to_kb": False,
-        "ocr_complete": False,
-    }
+        # Add completion signal tool
+        preparation_state = {
+            "clean_directory_path": None,
+            "ocr_complete": False,
+        }
 
-    @tool_decorator
-    def complete_preparation(
-        job_id: str, clean_directory_path: str, materials_added_to_kb: bool
-    ) -> str:
-        """Signal that preparation is complete and store results.
+        @tool_decorator
+        def complete_preparation(job_id: str, clean_directory_path: str) -> str:
+            """Signal that essay preparation and OCR processing is complete.
 
-        Args:
-            job_id: The job ID from batch_process_documents
-            clean_directory_path: Path to prepared files directory
-            materials_added_to_kb: Whether reading materials were added to KB
+            Args:
+                job_id: The job ID from batch_process_documents (should match state)
+                clean_directory_path: Path to prepared files directory
 
-        Returns:
-            Confirmation message
-        """
-        preparation_state["job_id"] = job_id
-        preparation_state["clean_directory_path"] = clean_directory_path
-        preparation_state["materials_added_to_kb"] = materials_added_to_kb
-        preparation_state["ocr_complete"] = True
-        return f"✓ Preparation complete. Job ID: {job_id}. Ready to inspect student list."
+            Returns:
+                Confirmation message
+            """
+            preparation_state["clean_directory_path"] = clean_directory_path
+            preparation_state["ocr_complete"] = True
+            return f"✓ Essay preparation complete. Job ID: {job_id}. Ready to inspect student list."
 
-    tools.append(complete_preparation)
+        tools.append(complete_preparation)
 
-    llm = get_llm().bind_tools(tools)
+        llm = get_llm().bind_tools(tools)
 
-    messages = [SystemMessage(content=system_prompt)] + list(state["messages"])
+        messages = [SystemMessage(content=system_prompt)] + list(state["messages"])
 
-    # Agentic loop
-    max_iterations = 10
-    iteration = 0
+        # Agentic loop
+        max_iterations = 10
+        iteration = 0
 
-    while iteration < max_iterations:
-        response = await llm.ainvoke(messages)
-        messages.append(response)
+        while iteration < max_iterations:
+            response = await llm.ainvoke(messages)
+            messages.append(response)
 
-        if not response.tool_calls:
-            break
+            if not response.tool_calls:
+                break
 
-        from langchain_core.messages import ToolMessage
+            from langchain_core.messages import ToolMessage
 
-        for tool_call in response.tool_calls:
-            tool_name = tool_call["name"]
-            tool_args = tool_call["args"]
+            for tool_call in response.tool_calls:
+                tool_name = tool_call["name"]
+                tool_args = tool_call["args"]
 
-            print(
-                f"[PREPARE_ESSAYS] Iteration {iteration}: Calling tool '{tool_name}' with args: {tool_args}",
-                flush=True,
-            )
+                print(f"[PREPARE_ESSAYS] Iteration {iteration}: Calling tool '{tool_name}'", flush=True)
 
-            matching_tool = next((t for t in tools if t.name == tool_name), None)
-            if matching_tool:
-                try:
-                    result = await matching_tool.ainvoke(tool_args)
+                matching_tool = next((t for t in tools if t.name == tool_name), None)
+                if matching_tool:
+                    try:
+                        result = await matching_tool.ainvoke(tool_args)
+                        messages.append(
+                            ToolMessage(
+                                content=str(result),
+                                tool_call_id=tool_call["id"],
+                                name=tool_name,
+                            )
+                        )
+                    except Exception as e:
+                        messages.append(
+                            ToolMessage(
+                                content=f"Error executing {tool_name}: {str(e)}",
+                                tool_call_id=tool_call["id"],
+                                name=tool_name,
+                            )
+                        )
+                else:
                     messages.append(
                         ToolMessage(
-                            content=str(result),
+                            content=f"Tool {tool_name} not found",
                             tool_call_id=tool_call["id"],
                             name=tool_name,
                         )
                     )
-                except Exception as e:
-                    messages.append(
-                        ToolMessage(
-                            content=f"Error executing {tool_name}: {str(e)}",
-                            tool_call_id=tool_call["id"],
-                            name=tool_name,
-                        )
-                    )
-            else:
-                messages.append(
-                    ToolMessage(
-                        content=f"Tool {tool_name} not found",
-                        tool_call_id=tool_call["id"],
-                        name=tool_name,
-                    )
-                )
 
-        iteration += 1
+            iteration += 1
 
-    # Return state - route to next phase if complete, otherwise stay in this node
-    if preparation_state.get("ocr_complete", False):
+        # Return state - route to next phase if complete, otherwise stay in this node
+        if preparation_state.get("ocr_complete", False):
+            return {
+                "current_phase": "inspect",
+                "next_step": "inspect_and_scrub",
+                "clean_directory_path": preparation_state["clean_directory_path"],
+                "ocr_complete": preparation_state["ocr_complete"],
+                "messages": messages[len(state["messages"]) :],
+            }
+        else:
+            # Not done yet - wait for user to upload essays
+            return {
+                "next_step": "END",
+                "current_phase": "prepare",  # Stay in prepare phase
+                "messages": messages[len(state["messages"]) :],
+            }
+    except Exception as e:
+        print(f"[PREPARE_ESSAYS] ERROR: {type(e).__name__}: {str(e)}", flush=True)
+        import traceback
+        traceback.print_exc()
+        from langchain_core.messages import AIMessage
         return {
-            "current_phase": "inspect",
-            "next_step": "inspect_and_scrub",
-            "job_id": preparation_state["job_id"],
-            "clean_directory_path": preparation_state["clean_directory_path"],
-            "materials_added_to_kb": preparation_state["materials_added_to_kb"],
-            "ocr_complete": preparation_state["ocr_complete"],
-            "messages": messages[len(state["messages"]) :],
-        }
-    else:
-        # Not done yet - route back to this node
-        return {
-            "next_step": "prepare_essays",
-            "messages": messages[len(state["messages"]) :],
-            # Preserve any state that was set
-            **{k: v for k, v in preparation_state.items() if v not in (None, False)},
+            "next_step": "END",
+            "messages": [AIMessage(content=f"I encountered an error in the prepare phase: {str(e)}\n\nPlease check the logs for more details.")],
         }
 
 
-# --- NEW: Inspect and Scrub Node (Phase 4 + 5) ---
+# --- NEW: Inspect and Scrub Node (Phase 3) ---
 async def inspect_and_scrub_node(state: AgentState) -> AgentState:
     """Inspection and privacy protection node - verifies student detection and scrubs PII.
 
@@ -740,7 +709,8 @@ async def inspect_and_scrub_node(state: AgentState) -> AgentState:
     Returns:
         Updated state with scrubbing completion status
     """
-    system_prompt = """You are a quality control coordinator. Your ONLY job is to call MCP server tools - you do NOT process data yourself.
+    try:
+        system_prompt = """You are a quality control coordinator. Your ONLY job is to call MCP server tools - you do NOT process data yourself.
 
 **CRITICAL: YOU ARE A COORDINATOR, NOT A DATA PROCESSOR**
 - The MCP server retrieves statistics and scrubs PII - you just coordinate
@@ -816,108 +786,115 @@ If ANY tool fails:
 Always be helpful: "This checkpoint helps ensure all students were detected correctly before grading begins."
 """
 
-    # Prepare context-aware prompt
-    job_id = state.get("job_id") or "Unknown"
-    student_count = state.get("student_count") or "Unknown"
+        # Prepare context-aware prompt
+        job_id = state.get("job_id") or "Unknown"
+        student_count = state.get("student_count") or "Unknown"
 
-    system_prompt = system_prompt.format(
-        job_id=job_id,
-        student_count=student_count,
-    )
+        system_prompt = system_prompt.format(
+            job_id=job_id,
+            student_count=student_count,
+        )
 
-    # Get MCP tools
-    from edagent.mcp_tools import get_phase_tools
-    from langchain_core.tools import tool as tool_decorator
+        # Get MCP tools
+        from edagent.mcp_tools import get_phase_tools
+        from langchain_core.tools import tool as tool_decorator
 
-    tools = await get_phase_tools("inspect")
+        tools = await get_phase_tools("inspect")
 
-    # Add completion signal tool
-    inspection_state = {"scrubbing_complete": False}
+        # Add completion signal tool
+        inspection_state = {"scrubbing_complete": False}
 
-    @tool_decorator
-    def complete_inspection(scrubbing_complete: bool) -> str:
-        """Signal that inspection and scrubbing are complete.
+        @tool_decorator
+        def complete_inspection(scrubbing_complete: bool) -> str:
+            """Signal that inspection and scrubbing are complete.
 
-        Args:
-            scrubbing_complete: Whether PII scrubbing was successful
+            Args:
+                scrubbing_complete: Whether PII scrubbing was successful
 
-        Returns:
-            Confirmation message
-        """
-        inspection_state["scrubbing_complete"] = scrubbing_complete
-        return "✓ Student verification and privacy protection complete. Ready to evaluate essays."
+            Returns:
+                Confirmation message
+            """
+            inspection_state["scrubbing_complete"] = scrubbing_complete
+            return "✓ Student verification and privacy protection complete. Ready to evaluate essays."
 
-    tools.append(complete_inspection)
+        tools.append(complete_inspection)
 
-    llm = get_llm().bind_tools(tools)
+        llm = get_llm().bind_tools(tools)
 
-    messages = [SystemMessage(content=system_prompt)] + list(state["messages"])
+        messages = [SystemMessage(content=system_prompt)] + list(state["messages"])
 
-    # Agentic loop
-    max_iterations = 10
-    iteration = 0
+        # Agentic loop
+        max_iterations = 10
+        iteration = 0
 
-    while iteration < max_iterations:
-        response = await llm.ainvoke(messages)
-        messages.append(response)
+        while iteration < max_iterations:
+            response = await llm.ainvoke(messages)
+            messages.append(response)
 
-        if not response.tool_calls:
-            break
+            if not response.tool_calls:
+                break
 
-        from langchain_core.messages import ToolMessage
+            from langchain_core.messages import ToolMessage
 
-        for tool_call in response.tool_calls:
-            tool_name = tool_call["name"]
-            tool_args = tool_call["args"]
+            for tool_call in response.tool_calls:
+                tool_name = tool_call["name"]
+                tool_args = tool_call["args"]
 
-            print(
-                f"[INSPECT_AND_SCRUB] Iteration {iteration}: Calling tool '{tool_name}' with args: {tool_args}",
-                flush=True,
-            )
+                print(f"[INSPECT_AND_SCRUB] Iteration {iteration}: Calling tool '{tool_name}'", flush=True)
 
-            matching_tool = next((t for t in tools if t.name == tool_name), None)
-            if matching_tool:
-                try:
-                    result = await matching_tool.ainvoke(tool_args)
+                matching_tool = next((t for t in tools if t.name == tool_name), None)
+                if matching_tool:
+                    try:
+                        result = await matching_tool.ainvoke(tool_args)
+                        messages.append(
+                            ToolMessage(
+                                content=str(result),
+                                tool_call_id=tool_call["id"],
+                                name=tool_name,
+                            )
+                        )
+                    except Exception as e:
+                        messages.append(
+                            ToolMessage(
+                                content=f"Error executing {tool_name}: {str(e)}",
+                                tool_call_id=tool_call["id"],
+                                name=tool_name,
+                            )
+                        )
+                else:
                     messages.append(
                         ToolMessage(
-                            content=str(result),
+                            content=f"Tool {tool_name} not found",
                             tool_call_id=tool_call["id"],
                             name=tool_name,
                         )
                     )
-                except Exception as e:
-                    messages.append(
-                        ToolMessage(
-                            content=f"Error executing {tool_name}: {str(e)}",
-                            tool_call_id=tool_call["id"],
-                            name=tool_name,
-                        )
-                    )
-            else:
-                messages.append(
-                    ToolMessage(
-                        content=f"Tool {tool_name} not found",
-                        tool_call_id=tool_call["id"],
-                        name=tool_name,
-                    )
-                )
 
-        iteration += 1
+            iteration += 1
 
-    # Return state - route to next phase if complete, otherwise stay in this node
-    if inspection_state.get("scrubbing_complete", False):
+        # Return state - route to next phase if complete, otherwise stay in this node
+        if inspection_state.get("scrubbing_complete", False):
+            return {
+                "current_phase": "evaluate",
+                "next_step": "evaluate_essays",
+                "scrubbing_complete": inspection_state["scrubbing_complete"],
+                "messages": messages[len(state["messages"]) :],
+            }
+        else:
+            # Not done yet - wait for teacher approval
+            return {
+                "next_step": "END",
+                "current_phase": "inspect",  # Stay in inspect phase
+                "messages": messages[len(state["messages"]) :],
+            }
+    except Exception as e:
+        print(f"[INSPECT_AND_SCRUB] ERROR: {type(e).__name__}: {str(e)}", flush=True)
+        import traceback
+        traceback.print_exc()
+        from langchain_core.messages import AIMessage
         return {
-            "current_phase": "evaluate",
-            "next_step": "evaluate_essays",
-            "scrubbing_complete": inspection_state["scrubbing_complete"],
-            "messages": messages[len(state["messages"]) :],
-        }
-    else:
-        # Not done yet - route back to this node
-        return {
-            "next_step": "inspect_and_scrub",
-            "messages": messages[len(state["messages"]) :],
+            "next_step": "END",
+            "messages": [AIMessage(content=f"I encountered an error in the inspect phase: {str(e)}\n\nPlease check the logs for more details.")],
         }
 
 
@@ -1084,10 +1061,7 @@ Always be patient: "Evaluation is running... This is the core grading step where
             tool_name = tool_call["name"]
             tool_args = tool_call["args"]
 
-            print(
-                f"[EVALUATE_ESSAYS] Iteration {iteration}: Calling tool '{tool_name}' with args: {tool_args}",
-                flush=True,
-            )
+            print(f"[EVALUATE_ESSAYS] Iteration {iteration}: Calling tool '{tool_name}'", flush=True)
 
             matching_tool = next((t for t in tools if t.name == tool_name), None)
             if matching_tool:
@@ -1301,10 +1275,7 @@ Always be celebratory: "Congratulations! All essays have been graded and reports
             tool_name = tool_call["name"]
             tool_args = tool_call["args"]
 
-            print(
-                f"[GENERATE_REPORTS] Iteration {iteration}: Calling tool '{tool_name}' with args: {tool_args}",
-                flush=True,
-            )
+            print(f"[GENERATE_REPORTS] Iteration {iteration}: Calling tool '{tool_name}'", flush=True)
 
             matching_tool = next((t for t in tools if t.name == tool_name), None)
             if matching_tool:
@@ -1461,7 +1432,7 @@ Always be fair and consistent in applying answer keys."""
             tool_args = tool_call["args"]
 
             # Debug logging
-            print(f"[TEST_GRADING] Iteration {iteration}: Calling tool '{tool_name}' with args: {tool_args}", flush=True)
+            print(f"[TEST_GRADING] Iteration {iteration}: Calling tool '{tool_name}'", flush=True)
 
             matching_tool = next((t for t in tools if t.name == tool_name), None)
             if matching_tool:
@@ -1605,7 +1576,7 @@ The email system is fully automatic and handles:
             tool_args = tool_call["args"]
 
             # Debug logging
-            print(f"[EMAIL_DISTRIBUTION] Iteration {iteration}: Calling tool '{tool_name}' with args: {tool_args}", flush=True)
+            print(f"[EMAIL_DISTRIBUTION] Iteration {iteration}: Calling tool '{tool_name}'", flush=True)
 
             # Inject job_id from state if not provided or is None
             if "job_id" in tool_args:
