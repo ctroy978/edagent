@@ -405,6 +405,7 @@ This creates a job in the edmcp database with all materials and returns a job_id
                             if result_dict.get("status") == "success":
                                 topic = result_dict.get("topic")
                                 gathered_state["knowledge_base_topic"] = topic
+                                gathered_state["materials_added_to_kb"] = True  # Set flag for evaluate phase
                                 print(f"[GATHER_MATERIALS] Context materials added to knowledge base. Topic: {topic}", flush=True)
                             else:
                                 print(f"[GATHER_MATERIALS] ERROR: add_to_knowledge_base failed: {result_dict}", flush=True)
@@ -412,10 +413,20 @@ This creates a job in the edmcp database with all materials and returns a job_id
                             print(f"[GATHER_MATERIALS] ERROR: Failed to parse add_to_knowledge_base result: {e}", flush=True)
                             print(f"[GATHER_MATERIALS] Raw result: {result}", flush=True)
 
-                    # Special handling for create_job_with_materials - extract job_id
+                    # Special handling for create_job_with_materials - extract job_id and track question
                     if tool_name == "create_job_with_materials":
                         import json
                         try:
+                            # Track question_text from the tool call arguments
+                            if "question_text" in tool_args and tool_args["question_text"]:
+                                gathered_state["question_text"] = tool_args["question_text"]
+                                print(f"[GATHER_MATERIALS] Tracked question_text from create_job_with_materials", flush=True)
+
+                            # Track rubric_text from the tool call arguments
+                            if "rubric" in tool_args and tool_args["rubric"]:
+                                gathered_state["rubric_text"] = tool_args["rubric"]
+                                print(f"[GATHER_MATERIALS] Tracked rubric_text from create_job_with_materials", flush=True)
+
                             result_dict = json.loads(result) if isinstance(result, str) else result
                             print(f"[GATHER_MATERIALS] create_job_with_materials result: {result_dict}", flush=True)
 
