@@ -1,11 +1,55 @@
-# EdAgent Development Status - January 8, 2026
+# EdAgent Development Status - January 9, 2026
 
 ## Summary
-Successfully implemented phase-specific tool filtering to enforce proper workflow separation. Fixed critical routing bugs and improved prepare_essays workflow. The agent now correctly follows the 5-node workflow without skipping phases. Ready for full end-to-end testing.
+Added comprehensive name validation system to catch OCR errors during the inspect phase. The agent now validates all detected student names against the school roster and prompts for corrections before grading begins. Fixed routing bugs and improved error reporting. Ready for full end-to-end testing with validated student names.
 
 ---
 
-## What We Completed Today (January 8, 2026)
+## What We Completed Today (January 9, 2026)
+
+### 1. **Name Validation System** ✅
+**Problem:** Agent accepted any detected name (like "pfour seven" from OCR errors) without validation against school roster. Names were only checked during email distribution (after grading), wasting time grading essays with wrong student names.
+
+**Solution:** Created two new MCP tools for pre-grading validation in `server.py`:
+- **validate_student_names(job_id)**: Checks all detected names against school_names.csv roster
+  - Returns matched_students (✓ in roster), mismatched_students (⚠ not in roster), missing_students (in roster but no essay)
+  - Example: Catches "pfour seven" as mismatched, suggests it needs correction
+- **correct_detected_name(job_id, essay_id, corrected_name)**: Updates database with corrected name
+  - Validates corrected name exists in roster before applying
+  - Provides reminder to update school_names.csv if OCR consistently misreads a name
+  - Supports partial matching for typo suggestions
+
+**Result:** Name mismatches are caught and corrected BEFORE grading begins, preventing wasted evaluation time.
+
+### 2. **Inspect Phase Workflow Enhancement** ✅
+**Problem:** inspect_and_scrub_node only showed detected names without validating them against the roster.
+
+**Solution:** Updated workflow in `nodes.py`:
+- Added validate_student_names and correct_detected_name to inspect phase tools
+- Updated system prompt to enforce validation workflow:
+  1. get_job_statistics (show detected names)
+  2. validate_student_names (check against roster)
+  3. If mismatches found → multi-turn dialog to correct each one
+  4. Re-validate after corrections
+  5. Only proceed to scrubbing once status="validated"
+- Increased max_iterations to 20 to support correction dialogs
+
+**Result:** Agent cannot proceed to scrubbing until all names are validated against the roster.
+
+### 3. **Routing and Error Handling Fixes** ✅
+**Problem:** App crashed with KeyError 'evaluate_essays' during phase transitions. Error messages weren't detailed enough for debugging.
+
+**Solution:**
+- Added all 5 workflow node names to app.py display dictionary (gather_materials, prepare_essays, inspect_and_scrub, evaluate_essays, generate_reports)
+- Added debug logging to route_decision function to track next_step values
+- Improved exception handler to show full stack traces
+- Added .get() with defaults to prevent KeyError
+
+**Result:** Better error messages and debugging capabilities for routing issues.
+
+---
+
+## What We Completed Previously (January 8, 2026)
 
 ### 1. **Phase-Specific Tool Filtering** ✅
 **Problem:** Agent had access to ALL grading tools in every phase, causing it to skip workflow steps and call tools prematurely (e.g., calling `evaluate_job` during gather phase).
@@ -13,7 +57,7 @@ Successfully implemented phase-specific tool filtering to enforce proper workflo
 **Solution:** Implemented `get_phase_tools(phase)` function in `mcp_tools.py`:
 - **gather phase:** Only gets `create_job_with_materials`, `add_to_knowledge_base`, `convert_pdf_to_text`, `read_text_file`
 - **prepare phase:** Only gets `batch_process_documents`
-- **inspect phase:** Only gets `get_job_statistics`, `scrub_processed_job`
+- **inspect phase:** Only gets `get_job_statistics`, `validate_student_names`, `correct_detected_name`, `scrub_processed_job`
 - **evaluate phase:** Only gets `query_knowledge_base`, `evaluate_job`
 - **report phase:** Only gets `generate_gradebook`, `generate_student_feedback`, `download_reports_locally`
 
@@ -84,6 +128,8 @@ prepare_essays_node:
 
 inspect_and_scrub_node:
   ✓ get_job_statistics
+  ✓ validate_student_names (NEW)
+  ✓ correct_detected_name (NEW)
   ✓ scrub_processed_job
   ✗ evaluate_job (blocked)
 
@@ -109,11 +155,12 @@ User: [uploads essays.pdf] → Router (sees phase="prepare") → prepare_essays
   ↓ returns: current_phase="inspect", next_step="inspect_and_scrub"
 
 Router → inspect_and_scrub
-  ↓ (shows student manifest)
-  ↓ returns: current_phase="inspect", next_step="END" (waits for approval)
+  ↓ (shows student manifest, validates names against roster)
+  ↓ If mismatches found: multi-turn dialog to correct each name
+  ↓ returns: current_phase="inspect", next_step="END" (waits for validation approval)
 
-User: "yes, looks good" → Router (sees phase="inspect") → inspect_and_scrub
-  ↓ (calls scrub_processed_job)
+User: "yes, all validated" → Router (sees phase="inspect") → inspect_and_scrub
+  ↓ (calls scrub_processed_job to remove PII)
   ↓ returns: current_phase="evaluate", next_step="evaluate_essays"
 
 (continue through evaluate and report phases...)
@@ -135,28 +182,50 @@ User: "yes, looks good" → Router (sees phase="inspect") → inspect_and_scrub
 
 ## Testing Status
 
-### ✅ What Works Now (Tested Today)
-1. **gather_materials_node** - Collects rubric, question, reading materials successfully
-2. **Phase-specific tool filtering** - Agent cannot call out-of-phase tools
-3. **Router resumption** - Can resume at prepare/inspect/evaluate/report phases
-4. **prepare_essays_node** - Recognizes already-attached files, processes without asking for count
-5. **Multi-turn workflow** - User can upload files across multiple messages
+### ✅ What Works Now
+1. **gather_materials_node** - Collects rubric, question, reading materials successfully (tested Jan 8)
+2. **Phase-specific tool filtering** - Agent cannot call out-of-phase tools (tested Jan 8)
+3. **Router resumption** - Can resume at prepare/inspect/evaluate/report phases (tested Jan 8)
+4. **prepare_essays_node** - Recognizes already-attached files, processes without asking for count (tested Jan 8)
+5. **Multi-turn workflow** - User can upload files across multiple messages (tested Jan 8)
+6. **Name validation tools** - validate_student_names and correct_detected_name created and integrated (Jan 9)
 
-### ⚠️ What's Not Fully Tested Yet
-1. **inspect_and_scrub_node** - Student manifest display, approval flow, scrubbing execution
-2. **evaluate_essays_node** - KB querying, evaluation with rubric
-3. **generate_reports_node** - Report generation, download links
-4. **Full end-to-end flow** - Complete workflow from rubric to final reports
-5. **Error recovery** - What happens if MCP tool fails mid-workflow?
+### ⚠️ What Needs Testing (January 9)
+1. **Name validation workflow** - Test with essays containing mismatched names like "pfour seven"
+   - Verify validate_student_names catches the mismatch
+   - Verify agent prompts for correction
+   - Verify correct_detected_name updates database correctly
+   - Verify CSV update reminder is shown
+2. **inspect_and_scrub_node with validation** - Complete inspect phase with name corrections
+3. **evaluate_essays_node** - KB querying, evaluation with rubric (previously crashed with KeyError)
+4. **generate_reports_node** - Report generation, download links
+5. **Full end-to-end flow** - Complete workflow from rubric to final reports with validated names
 
 ### 🐛 Known Issues
-- None currently identified (all previous issues resolved)
+- **FIXED (Jan 9):** KeyError 'evaluate_essays' during routing - added missing node names and debug logging
+- **IDENTIFIED (Jan 9):** Original test crashed at evaluate phase - needs re-testing with fixes
 
 ---
 
 ## Recent Git Commits
 
-**Latest Commit (January 8, 2026):**
+**Latest Commits (January 9, 2026):**
+```
+EdAgent:
+commit d3d1977 - feat: integrate name validation in inspect phase and fix routing
+  - Added validate_student_names and correct_detected_name to inspect phase
+  - Updated inspect_and_scrub_node for name validation workflow
+  - Fixed routing bugs and improved error reporting
+  - Added debug logging and full stack traces
+
+EdMCP:
+commit 275dd0a - feat: add name validation tools for pre-grading inspection
+  - Created validate_student_names tool to check names against roster
+  - Created correct_detected_name tool for pre-grading name corrections
+  - Both tools integrated into inspect phase workflow
+```
+
+**Previous (January 8, 2026):**
 ```
 commit 10e6e1bf - feat: implement phase-specific tool filtering and workflow fixes
   - Added get_phase_tools(phase) for tool access control
@@ -173,26 +242,28 @@ commit 10e6e1bf - feat: implement phase-specific tool filtering and workflow fix
 
 ## Next Steps
 
-### Immediate (Next Session - January 9, 2026)
+### Immediate (Next Session - January 10, 2026)
 
-**PRIMARY GOAL: Complete End-to-End Test**
-1. Test full workflow with sample data:
-   - Upload rubric (PDF or paste)
-   - Provide essay question
-   - Upload reading materials (test KB integration)
-   - Upload 4-5 sample essays (handwritten PDF - single multi-page file)
-   - **Focus on:** Does scrubbing work? Are names detected? Are reports generated?
+**PRIMARY GOAL: Test Name Validation and Complete End-to-End**
+1. Test name validation workflow with intentional mismatch:
+   - Use the same test data that had "pfour seven" mismatch
+   - Verify validate_student_names catches the mismatch
+   - Verify agent shows clear error message
+   - Provide corrected name and verify database update
+   - Verify CSV update reminder is displayed
 
-2. Fix any issues found in:
-   - `inspect_and_scrub_node` - Most likely to have issues (not yet tested)
-   - `evaluate_essays_node` - KB query and evaluation
-   - `generate_reports_node` - Report generation and download
+2. Complete end-to-end test:
+   - Continue through evaluate phase (previously crashed with KeyError)
+   - Test KB query if reading materials were provided
+   - Verify evaluate_job completes successfully
+   - Test report generation phase
+   - Verify downloads work correctly
 
-3. Verify the scrubbing workflow specifically:
-   - Does `get_job_statistics` return student names?
-   - Does the agent present them clearly?
-   - Does `scrub_processed_job` execute correctly?
-   - Are names properly removed from essay text?
+3. Verify the complete validation workflow:
+   - Names are validated against roster BEFORE scrubbing
+   - Agent cannot proceed to scrubbing until all names validated
+   - Scrubbing only happens after validation complete
+   - Evaluation receives validated student names
 
 ### Short-term (This Week)
 1. Test with edge cases:
@@ -299,7 +370,7 @@ commit 10e6e1bf - feat: implement phase-specific tool filtering and workflow fix
 
 ---
 
-**Status:** Phase separation enforced, ready for end-to-end testing
-**Last Updated:** January 8, 2026 at 19:45 PST
-**Session:** Phase-specific tool filtering and workflow fixes
-**Next Action:** Full end-to-end test with focus on inspect/evaluate/report phases
+**Status:** Name validation system implemented, routing bugs fixed, ready for end-to-end testing
+**Last Updated:** January 9, 2026 at 20:10 PST
+**Session:** Name validation tools and inspect phase enhancement
+**Next Action:** Test name validation with mismatched names, then complete end-to-end workflow through evaluate and report phases
