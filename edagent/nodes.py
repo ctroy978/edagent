@@ -737,13 +737,14 @@ async def inspect_and_scrub_node(state: AgentState) -> AgentState:
 - Returns:
   - matched_students: Names that are in the roster (✓ Good)
   - mismatched_students: Names NOT in roster (⚠ Need correction)
-  - missing_students: Roster students with no essay found
+  - total_missing: Count of roster students with no essay (just a number, NOT a list)
 
 **Task 3: Present Results to Teacher**
 - If ALL names validated (status="validated"):
   - Show summary: "✓ All X students validated successfully!"
-  - List the matched students
-  - If there are missing students, note: "⚠ These roster students didn't submit: [list]"
+  - List the matched students (name and word count)
+  - **IMPORTANT**: Do NOT list missing students by name - only mention the count if > 0
+  - If total_missing > 0, note: "(Note: X roster students did not submit essays)"
   - Ask: "Ready to proceed with scrubbing?"
 
 - If MISMATCHES found (status="needs_corrections"):
