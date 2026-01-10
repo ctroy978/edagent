@@ -133,7 +133,11 @@ async def on_message(message: cl.Message):
             # Node display names for better UX
             node_names = {
                 "router": "🔍 Understanding your request",
-                "essay_grading": "📝 Processing essay grading request",
+                "gather_materials": "📋 Gathering materials",
+                "prepare_essays": "📄 Preparing essays for grading",
+                "inspect_and_scrub": "🔍 Inspecting and scrubbing PII",
+                "evaluate_essays": "✍️ Evaluating essays",
+                "generate_reports": "📊 Generating reports",
                 "test_grading": "📋 Processing test grading request",
                 "general": "💬 Preparing response",
                 "email_distribution": "📧 Preparing email distribution",
@@ -211,7 +215,11 @@ async def on_message(message: cl.Message):
         await cl.Message(content=response_content, elements=elements).send()
 
     except Exception as e:
-        error_message = f"I encountered an error: {str(e)}\n\nPlease make sure:\n1. Your .env file is configured correctly\n2. The MCP server path is valid\n3. You have the necessary API keys set"
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"[APP ERROR] {error_trace}", flush=True)
+
+        error_message = f"I encountered an error: {type(e).__name__}: {str(e)}\n\nPlease make sure:\n1. Your .env file is configured correctly\n2. The MCP server path is valid\n3. You have the necessary API keys set\n\nError details have been logged to the console."
         await cl.Message(content=error_message).send()
 
 

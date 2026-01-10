@@ -713,7 +713,7 @@ async def inspect_and_scrub_node(state: AgentState) -> AgentState:
         system_prompt = """You are a quality control coordinator. Your ONLY job is to call MCP server tools - you do NOT process data yourself.
 
 **CRITICAL: YOU ARE A COORDINATOR, NOT A DATA PROCESSOR**
-- The MCP server retrieves statistics and scrubs PII - you just coordinate
+- The MCP server retrieves statistics, validates names, and scrubs PII - you just coordinate
 - NEVER attempt to read essay content or detect students yourself
 - Your job: Call the MCP tools and present results to teacher
 
@@ -730,43 +730,52 @@ async def inspect_and_scrub_node(state: AgentState) -> AgentState:
 - The MCP server returns: Student list with names, page counts, word counts, status
 - Parse the response to understand what students were detected
 
-**Task 2: Present Manifest to Teacher**
-- Show the teacher a clear list:
-  ```
-  I found X students:
-  1. John Smith (3 pages, 450 words)
-  2. Jane Doe (2 pages, 380 words)
-  3. Unknown Student 01 (4 pages, 520 words)
+**Task 2: Validate Student Names Against Roster (MCP SERVER DOES THIS)**
+- **CRITICAL**: Call validate_student_names - do NOT try to validate names yourself
+- Call: validate_student_names(job_id="{job_id}")
+- The MCP server checks each detected name against the school roster CSV
+- Returns:
+  - matched_students: Names that are in the roster (✓ Good)
+  - mismatched_students: Names NOT in roster (⚠ Need correction)
+  - missing_students: Roster students with no essay found
 
-  Does this look correct? Are all your students accounted for?
-  ```
-- **IMPORTANT**: Be clear about Unknown Students - explain they're essays without "Name: John Doe" at the top
+**Task 3: Present Results to Teacher**
+- If ALL names validated (status="validated"):
+  - Show summary: "✓ All X students validated successfully!"
+  - List the matched students
+  - If there are missing students, note: "⚠ These roster students didn't submit: [list]"
+  - Ask: "Ready to proceed with scrubbing?"
 
-**Task 3: Handle Teacher Response**
-- If teacher says **YES** (approve):
-  - Move to Task 4 (scrubbing)
-- If teacher says **NO** (issues):
-  - Explain name detection requirements:
-    "For student names to be detected, essays must have 'Name: Full Name' at the TOP of the FIRST PAGE only.
+- If MISMATCHES found (status="needs_corrections"):
+  - Show the problem:
+    ```
+    ⚠ Found X name(s) that need correction:
+    1. "pfour seven" (Essay ID: 5) - Not found in roster
 
-    If students are missing:
-    - Check if their names follow this format
-    - Ensure the name appears at the top (not middle or bottom)
-    - Make sure it's on the first page only
+    This is likely an OCR error. What is the correct name for this student?
+    ```
+  - Wait for teacher to provide the corrected name
+  - Do NOT proceed to scrubbing until all names are corrected
 
-    Would you like me to explain how to retry processing with corrected files?"
-  - Wait for teacher to decide next steps
-  - If retry requested, explain they need to contact previous node (out of scope for this node)
+**Task 4: Correct Mismatched Names (IF NEEDED)**
+- For EACH mismatched student, the teacher will provide a corrected name
+- Call: correct_detected_name(job_id="{job_id}", essay_id=<id>, corrected_name="<teacher_provided_name>")
+- The tool will:
+  - Verify the corrected name exists in the roster
+  - Update the database
+  - Show a reminder to update school_names.csv if needed
+- After ALL corrections are made, re-run validate_student_names to confirm
+- Once status="validated", proceed to Task 5
 
-**Task 4: Privacy Protection (MCP SERVER DOES THIS)**
-Once teacher approves:
+**Task 5: Privacy Protection (MCP SERVER DOES THIS)**
+Once ALL names are validated:
 - **CRITICAL**: Call scrub_processed_job - do NOT attempt to scrub essays yourself
 - Call: scrub_processed_job(job_id="{job_id}")
 - The MCP server removes all student names from essay text for privacy during AI evaluation
-- Confirm: "Great! The MCP server has removed student names for privacy. Ready to start grading..."
+- Confirm: "✓ Privacy protection complete. Student names have been scrubbed. Ready to start grading..."
 - Signal completion
 
-**Task 5: Signal Completion**
+**Task 6: Signal Completion**
 - Call: complete_inspection(scrubbing_complete=True)
 - This signals you're ready to move to evaluation phase
 
@@ -780,10 +789,16 @@ If ANY tool fails:
 
 **TOOLS AVAILABLE:**
 - get_job_statistics(job_id)
+- validate_student_names(job_id)
+- correct_detected_name(job_id, essay_id, corrected_name)
 - scrub_processed_job(job_id)
 - complete_inspection (signals completion)
 
-Always be helpful: "This checkpoint helps ensure all students were detected correctly before grading begins."
+**IMPORTANT WORKFLOW RULE:**
+DO NOT call scrub_processed_job until validate_student_names returns status="validated"!
+All name mismatches must be corrected first.
+
+Always be helpful: "This checkpoint helps ensure all students are correctly identified before grading begins."
 """
 
         # Prepare context-aware prompt
@@ -823,8 +838,8 @@ Always be helpful: "This checkpoint helps ensure all students were detected corr
 
         messages = [SystemMessage(content=system_prompt)] + list(state["messages"])
 
-        # Agentic loop
-        max_iterations = 10
+        # Agentic loop (increased for name correction dialog)
+        max_iterations = 20
         iteration = 0
 
         while iteration < max_iterations:
@@ -1707,4 +1722,6 @@ def route_decision(
     Returns:
         Name of the next node to execute
     """
-    return state["next_step"]
+    next_step = state.get("next_step", "END")
+    print(f"[ROUTE_DECISION] next_step={repr(next_step)}, current_phase={repr(state.get('current_phase'))}", flush=True)
+    return next_step

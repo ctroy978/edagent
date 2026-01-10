@@ -252,6 +252,8 @@ async def get_phase_tools(phase: str) -> List[StructuredTool]:
         ],
         "inspect": [
             "get_job_statistics",         # Retrieve student manifest
+            "validate_student_names",     # Validate names against roster
+            "correct_detected_name",      # Fix name mismatches
             "scrub_processed_job",        # Remove PII from essays
         ],
         "evaluate": [
