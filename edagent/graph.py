@@ -8,6 +8,8 @@ from edagent.nodes import (
     gather_materials_node,
     prepare_essays_node,
     inspect_and_scrub_node,
+    validate_student_names_node,
+    scrub_pii_node,
     evaluate_essays_node,
     generate_reports_node,
     test_grading_node,
@@ -36,12 +38,16 @@ def create_graph() -> StateGraph:
     # Add nodes
     workflow.add_node("router", router_node)
 
-    # 5-node essay grading chain
+    # 6-node essay grading chain (split inspect into validate + scrub)
     workflow.add_node("gather_materials", gather_materials_node)
     workflow.add_node("prepare_essays", prepare_essays_node)
-    workflow.add_node("inspect_and_scrub", inspect_and_scrub_node)
+    workflow.add_node("validate_student_names", validate_student_names_node)
+    workflow.add_node("scrub_pii", scrub_pii_node)
     workflow.add_node("evaluate_essays", evaluate_essays_node)
     workflow.add_node("generate_reports", generate_reports_node)
+
+    # Legacy node (kept for backward compatibility, will be removed later)
+    workflow.add_node("inspect_and_scrub", inspect_and_scrub_node)
 
     # Other specialist nodes
     workflow.add_node("test_grading", test_grading_node)
@@ -56,11 +62,13 @@ def create_graph() -> StateGraph:
         "router",
         route_decision,
         {
-            "gather_materials": "gather_materials",  # Start of 5-node essay grading chain
-            "prepare_essays": "prepare_essays",      # Resume essay grading workflow
-            "inspect_and_scrub": "inspect_and_scrub", # Resume essay grading workflow
-            "evaluate_essays": "evaluate_essays",    # Resume essay grading workflow
-            "generate_reports": "generate_reports",  # Resume essay grading workflow
+            "gather_materials": "gather_materials",          # Start of 6-node essay grading chain
+            "prepare_essays": "prepare_essays",              # Resume essay grading workflow
+            "validate_student_names": "validate_student_names", # Resume at name validation
+            "scrub_pii": "scrub_pii",                       # Resume at scrubbing
+            "inspect_and_scrub": "inspect_and_scrub",       # Legacy routing (backward compat)
+            "evaluate_essays": "evaluate_essays",            # Resume essay grading workflow
+            "generate_reports": "generate_reports",          # Resume essay grading workflow
             "test_grading": "test_grading",
             "general": "general",
             "email_distribution": "email_distribution",
@@ -81,10 +89,27 @@ def create_graph() -> StateGraph:
         "prepare_essays",
         route_decision,
         {
-            "inspect_and_scrub": "inspect_and_scrub",
+            "validate_student_names": "validate_student_names",  # New: route to validation
             "END": END,
         },
     )
+    workflow.add_conditional_edges(
+        "validate_student_names",
+        route_decision,
+        {
+            "scrub_pii": "scrub_pii",  # After validation, scrub PII
+            "END": END,  # Or wait for name corrections
+        },
+    )
+    workflow.add_conditional_edges(
+        "scrub_pii",
+        route_decision,
+        {
+            "evaluate_essays": "evaluate_essays",  # After scrubbing, evaluate
+            "END": END,
+        },
+    )
+    # Legacy routing (kept for backward compatibility)
     workflow.add_conditional_edges(
         "inspect_and_scrub",
         route_decision,
@@ -105,6 +130,7 @@ def create_graph() -> StateGraph:
         "generate_reports",
         route_decision,
         {
+            "email_distribution": "email_distribution",
             "router": "router",
             "END": END,
         },

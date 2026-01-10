@@ -80,11 +80,26 @@ async def router_node(state: AgentState) -> AgentState:
     print(f"[ROUTER DEBUG] last_message: {last_message}")
     print(f"[ROUTER DEBUG] full state keys: {state.keys()}")
 
+    # Check for email distribution intent FIRST (before phase routing)
+    # This allows users to confirm email after grading completes
+    email_keywords = ["email", "send", "distribute", "mail", "yes", "yeah", "yep", "sure", "ok", "okay"]
+
+    if job_id and current_phase == "report" and any(keyword in last_message for keyword in email_keywords):
+        # User has a completed grading job and is confirming email distribution
+        print(f"[ROUTER DEBUG] Routing to email_distribution with job_id: {job_id}")
+        return {
+            "next_step": "email_distribution",
+            "job_id": job_id,  # CRITICAL: Pass through the job_id
+            "messages": [AIMessage(content=f"Great! Let me help you distribute these via email. (Using job_id: {job_id})")],
+        }
+
     # Check if we're continuing a workflow (phase in progress)
     phase_routing = {
         "gather": "gather_materials",
         "prepare": "prepare_essays",
-        "inspect": "inspect_and_scrub",
+        "validate": "validate_student_names",  # New: name validation phase
+        "scrub": "scrub_pii",                  # New: PII scrubbing phase
+        "inspect": "inspect_and_scrub",        # Legacy: old combined phase
         "evaluate": "evaluate_essays",
         "report": "generate_reports",
     }
@@ -96,18 +111,6 @@ async def router_node(state: AgentState) -> AgentState:
         return {
             "next_step": next_node,
             "messages": [],  # Don't add routing message, let the phase node handle it
-        }
-
-    # Keywords that indicate email intent
-    email_keywords = ["email", "send", "distribute", "mail", "yes", "yeah", "yep", "sure", "ok", "okay"]
-
-    if job_id and any(keyword in last_message for keyword in email_keywords):
-        # User has a completed grading job and is confirming email distribution
-        print(f"[ROUTER DEBUG] Routing to email_distribution with job_id: {job_id}")
-        return {
-            "next_step": "email_distribution",
-            "job_id": job_id,  # CRITICAL: Pass through the job_id
-            "messages": [AIMessage(content=f"Great! Let me help you distribute these via email. (Using job_id: {job_id})")],
         }
 
     print(f"[ROUTER DEBUG] Not routing to email - proceeding to LLM decision")
@@ -206,6 +209,7 @@ async def gather_materials_node(state: AgentState) -> AgentState:
 2. NEVER show internal thinking or reasoning to the user
 3. Present overview ONLY on first message (check if current_phase is None)
 4. NEVER repeat greetings or overviews - stay contextual
+5. **NEVER ask for:** job name, student count, or essay format - these are auto-generated/detected
 
 **PHASE 0: PRESENT OVERVIEW (ONLY IF current_phase IS None)**
 
@@ -263,6 +267,11 @@ Let's start: Do you have a grading rubric? You can upload it with 📎 or paste 
 - If NO: "No problem! I'll grade based on the rubric alone."
 - Move to completion
 
+**Step 4: Create Job (DO NOT ASK ANY QUESTIONS)**
+- **CRITICAL:** DO NOT ask the user for job name, student count, or essay format
+- Simply call create_job_with_materials with the materials you've gathered
+- The MCP server will auto-generate a job_id and handle all metadata
+
 **TOOLS AVAILABLE:**
 - convert_pdf_to_text: Read PDF files - returns text_content
 - read_text_file: Read plain text files (.txt, .md) - returns text_content
@@ -299,14 +308,14 @@ Once you have:
 2. If user uploaded context materials, did I call add_to_knowledge_base? (If not, STOP and call it now!)
 3. Do I have the topic name if materials were added? (Required if Step 2 was yes)
 
-**IMPORTANT - How to handle optional parameters:**
-- If question_text was provided: Include it as a string
-- If question_text was NOT provided: OMIT the parameter entirely (do not pass "None" as a string!)
+**IMPORTANT - How to call create_job_with_materials:**
+- **NEVER ask the user for:** job name, student count, or essay format - these are all optional/auto-detected
+- **DO NOT include:** job_name, student_count, or essay_format parameters - let MCP auto-generate/detect them
+- **Only provide:** rubric (required), question_text (if user provided it), knowledge_base_topic (if materials were added)
 
 **Example when question AND context are provided:**
 ```
 create_job_with_materials(
-    job_name="WR121_Essays",
     rubric="<the rubric text>",
     question_text="Analyze themes in Frost's poetry",
     knowledge_base_topic="WR121_Essays"  # Topic used when adding to knowledge base
@@ -316,7 +325,6 @@ create_job_with_materials(
 **Example when only rubric is provided:**
 ```
 create_job_with_materials(
-    job_name="WR121_Essays",
     rubric="<the rubric text>"
 )
 ```
@@ -504,6 +512,15 @@ async def prepare_essays_node(state: AgentState) -> AgentState:
         Updated state with OCR completion status
     """
     try:
+        # Check if OCR was already completed - prevent duplicate processing
+        if state.get("ocr_complete", False):
+            print("[PREPARE_ESSAYS] OCR already complete, skipping to validation phase", flush=True)
+            return {
+                "next_step": "validate_student_names",
+                "current_phase": "validate",
+                "messages": [],
+            }
+
         system_prompt = """You are an essay preparation coordinator. Your job is to get the student essays uploaded and processed with OCR.
 
 **CRITICAL: YOU ARE A COORDINATOR, NOT A PROCESSOR**
@@ -650,6 +667,21 @@ Always be encouraging: "Great! Essays are processed. Let's verify the student li
                 if matching_tool:
                     try:
                         result = await matching_tool.ainvoke(tool_args)
+
+                        # Special handling for batch_process_documents - extract student count
+                        if tool_name == "batch_process_documents":
+                            import json
+                            try:
+                                result_dict = json.loads(result) if isinstance(result, str) else result
+                                print(f"[PREPARE_ESSAYS] batch_process_documents result: {result_dict}", flush=True)
+
+                                if result_dict.get("status") == "success" and "students_detected" in result_dict:
+                                    student_count = result_dict["students_detected"]
+                                    preparation_state["student_count"] = student_count
+                                    print(f"[PREPARE_ESSAYS] Captured student_count: {student_count}", flush=True)
+                            except Exception as e:
+                                print(f"[PREPARE_ESSAYS] ERROR: Failed to parse batch_process_documents result: {e}", flush=True)
+
                         messages.append(
                             ToolMessage(
                                 content=str(result),
@@ -678,13 +710,17 @@ Always be encouraging: "Great! Essays are processed. Let's verify the student li
 
         # Return state - route to next phase if complete, otherwise stay in this node
         if preparation_state.get("ocr_complete", False):
-            return {
-                "current_phase": "inspect",
-                "next_step": "inspect_and_scrub",
+            return_state = {
+                "current_phase": "validate",
+                "next_step": "validate_student_names",
                 "clean_directory_path": preparation_state["clean_directory_path"],
                 "ocr_complete": preparation_state["ocr_complete"],
                 "messages": messages[len(state["messages"]) :],
             }
+            # Add student_count if it was captured
+            if "student_count" in preparation_state:
+                return_state["student_count"] = preparation_state["student_count"]
+            return return_state
         else:
             # Not done yet - wait for user to upload essays
             return {
@@ -733,7 +769,19 @@ async def inspect_and_scrub_node(state: AgentState) -> AgentState:
 - Expected student count: {student_count}
 - OCR processing: ✓ Complete (MCP server processed all files)
 
+**NOTE ABOUT DUPLICATES:**
+- If OCR was run multiple times on the same files, there may be duplicate essay records in the database
+- Each duplicate has a different essay_id but identical content
+- You must correct ALL instances - validate_student_names will find each one that needs correction
+- This is normal behavior - just continue the correction process until all are fixed
+
 **YOUR TASKS (IN ORDER):**
+
+**WORKFLOW OVERVIEW:**
+1. Call get_job_statistics (show what was detected)
+2. Call validate_student_names (check against roster)
+3. If mismatches found → correct them → IMMEDIATELY re-validate in same turn
+4. If all validated → scrub → complete
 
 **Task 1: Retrieve Student Manifest (MCP SERVER DOES THIS)**
 - **CRITICAL**: Call get_job_statistics - do NOT attempt to read or parse essays yourself
@@ -759,25 +807,43 @@ async def inspect_and_scrub_node(state: AgentState) -> AgentState:
   - Ask: "Ready to proceed with scrubbing?"
 
 - If MISMATCHES found (status="needs_corrections"):
-  - Show the problem:
+  - Show ALL mismatched essays clearly:
     ```
     ⚠ Found X name(s) that need correction:
-    1. "pfour seven" (Essay ID: 5) - Not found in roster
 
-    This is likely an OCR error. What is the correct name for this student?
+    1. Essay ID 49: "Unknown Student 01" - Not found in roster
+       Essay preview: "[Show the essay_preview from the mismatched_students data]"
+
+    2. Essay ID 52: "Unknown Student 02" - Not found in roster
+       Essay preview: "[Show the essay_preview from the mismatched_students data]"
+
+    Please provide the correct names for these students, one at a time or all at once.
     ```
-  - Wait for teacher to provide the corrected name
+  - **CRITICAL**:
+    - Show essay_preview for each so teacher can identify physical essays
+    - List ALL mismatched students at once
+    - If there are duplicate essay IDs with similar content, mention this may be due to re-processing
+  - Wait for teacher to provide the corrected name(s)
   - Do NOT proceed to scrubbing until all names are corrected
 
 **Task 4: Correct Mismatched Names (IF NEEDED)**
-- For EACH mismatched student, the teacher will provide a corrected name
-- Call: correct_detected_name(job_id="{job_id}", essay_id=<id>, corrected_name="<teacher_provided_name>")
-- The tool will:
-  - Verify the corrected name exists in the roster
-  - Update the database
-  - Show a reminder to update school_names.csv if needed
-- After ALL corrections are made, re-run validate_student_names to confirm
-- Once status="validated", proceed to Task 5
+- The teacher will provide corrected name(s) - either one at a time or multiple
+- For EACH correction provided:
+  1. Call: correct_detected_name(job_id="{job_id}", essay_id=<id>, corrected_name="<teacher_provided_name>")
+  2. The tool verifies the name exists in roster and updates the database
+  3. If successful, acknowledge: "✓ Essay ID X updated to [Name]"
+  4. If the name is not in roster, the tool will suggest similar names - ask teacher to clarify
+- **CRITICAL - IMMEDIATELY after ALL corrections in this turn:**
+  - **DO NOT just say you'll re-check - ACTUALLY call the tool NOW**
+  - Call: validate_student_names(job_id="{job_id}") in the SAME turn
+  - Check the status in the response
+- If validate_student_names returns status="validated":
+  - ALL names are now correct! Proceed to Task 5 (scrubbing)
+- If validate_student_names still shows status="needs_corrections":
+  - Show the remaining mismatches (these might be different essay IDs that also need correction)
+  - End the turn and wait for teacher to provide more corrections
+  - Continue the correction process in next turn
+- Only proceed to Task 5 when validate_student_names returns status="validated"
 
 **Task 5: Privacy Protection (MCP SERVER DOES THIS)**
 Once ALL names are validated:
@@ -922,6 +988,368 @@ Always be helpful: "This checkpoint helps ensure all students are correctly iden
         return {
             "next_step": "END",
             "messages": [AIMessage(content=f"I encountered an error in the inspect phase: {str(e)}\n\nPlease check the logs for more details.")],
+        }
+
+
+# --- REFACTORED: Validate Student Names Node (Phase 3a) ---
+async def validate_student_names_node(state: AgentState) -> AgentState:
+    """Name validation node - verifies detected names against school roster.
+
+    This node:
+    1. Calls get_job_statistics to retrieve student manifest
+    2. Calls validate_student_names to check against roster
+    3. Shows results to teacher
+    4. If mismatches found, handles multi-turn correction dialog
+    5. Re-validates after corrections
+    6. Exits when status="validated", moving to scrub_pii phase
+
+    Args:
+        state: Current agent state with job_id from OCR
+
+    Returns:
+        Updated state with validation_complete flag
+    """
+    try:
+        system_prompt = """You are a student name validation coordinator. Your job is to verify all detected student names against the school roster.
+
+**CRITICAL: YOU ARE A COORDINATOR, NOT A DATA PROCESSOR**
+- The MCP server validates names and handles corrections - you just coordinate
+- NEVER attempt to validate names yourself or read essay content
+- Your job: Call the MCP tools and present results to teacher
+
+**CONTEXT FROM PREVIOUS PHASE:**
+- Job ID: {job_id}
+- Expected student count: {student_count}
+- OCR processing: ✓ Complete (MCP server processed all files)
+
+**NOTE ABOUT DUPLICATES:**
+- If OCR was run multiple times, there may be duplicate essay records in the database
+- Each duplicate has a different essay_id but identical content
+- You must correct ALL instances - validate_student_names will find each one
+- This is normal behavior - just continue until all are corrected
+
+**YOUR WORKFLOW (SIMPLE 3-STEP PROCESS):**
+
+**Step 1: Get Student Manifest**
+- Call: get_job_statistics(job_id="{job_id}")
+- This shows what students were detected from the essays
+
+**Step 2: Validate Names Against Roster**
+- Call: validate_student_names(job_id="{job_id}")
+- This checks each name against school_names.csv
+- Returns:
+  - matched_students: Names in roster (✓ Good)
+  - mismatched_students: Names NOT in roster (⚠ Need correction)
+    - Each includes essay_preview to help identify the physical essay
+  - total_missing: Count of roster students with no essay
+
+**Step 3: Handle Results**
+
+**IF status="validated" (all names matched):**
+- Show summary: "✓ All X students validated successfully!"
+- List the matched students (name and word count)
+- If total_missing > 0, note: "(Note: X roster students did not submit essays)"
+- Call: complete_validation(validation_complete=True)
+- This moves to the scrubbing phase
+
+**IF status="needs_corrections" (mismatches found):**
+- Show ALL mismatched essays clearly:
+  ```
+  ⚠ Found X name(s) that need correction:
+
+  1. Essay ID 59: "Unknown Student 01" - Not found in roster
+     Essay preview: "seven 1 pfour seven College Writing..."
+
+  Please provide the correct names for these students.
+  ```
+- **CRITICAL**: Show essay_preview for each so teacher can identify physical essays
+- Wait for teacher to provide corrected name(s)
+
+**Step 4: Apply Corrections (IF MISMATCHES FOUND)**
+- Teacher will provide corrections (e.g., "59: Pfour meven" or just "Pfour meven" if clear)
+- For EACH correction:
+  1. Call: correct_detected_name(job_id="{job_id}", essay_id=X, corrected_name="Name")
+  2. Acknowledge: "✓ Essay ID X updated to [Name]"
+- **CRITICAL - IMMEDIATELY after ALL corrections in this turn:**
+  - **DO NOT just say you'll re-check - ACTUALLY call validate_student_names NOW**
+  - Call: validate_student_names(job_id="{job_id}") in the SAME turn
+  - Check the status in the response
+- If status="validated": Call complete_validation and exit
+- If status="needs_corrections": Show remaining mismatches, wait for more corrections
+
+**TOOLS AVAILABLE:**
+- get_job_statistics(job_id) - Show detected students
+- validate_student_names(job_id) - Check against roster
+- correct_detected_name(job_id, essay_id, corrected_name) - Fix a name
+- complete_validation(validation_complete) - Signal completion
+
+**ERROR HANDLING:**
+If ANY tool fails, report: "Error while [action]: [error message]"
+
+Always be helpful: "This ensures all students are correctly identified before grading begins."
+"""
+
+        # Prepare context-aware prompt
+        job_id = state.get("job_id") or "Unknown"
+        student_count = state.get("student_count") or "Unknown"
+
+        system_prompt = system_prompt.format(
+            job_id=job_id,
+            student_count=student_count,
+        )
+
+        # Get MCP tools (only validation tools, not scrubbing)
+        from edagent.mcp_tools import get_phase_tools
+        from langchain_core.tools import tool as tool_decorator
+
+        tools = await get_phase_tools("validate")  # Gets validation tools only
+
+        # Add completion signal tool
+        validation_state = {"validation_complete": False}
+
+        @tool_decorator
+        def complete_validation(validation_complete: bool) -> str:
+            """Signal that name validation is complete.
+
+            Args:
+                validation_complete: Whether all names have been validated
+
+            Returns:
+                Confirmation message
+            """
+            validation_state["validation_complete"] = validation_complete
+            return "✓ All student names validated successfully. Ready for privacy scrubbing."
+
+        tools.append(complete_validation)
+
+        llm = get_llm().bind_tools(tools)
+
+        messages = [SystemMessage(content=system_prompt)] + list(state["messages"])
+
+        # Agentic loop (increased for multi-turn name corrections)
+        max_iterations = 20
+        iteration = 0
+
+        while iteration < max_iterations:
+            response = await llm.ainvoke(messages)
+            messages.append(response)
+
+            if not response.tool_calls:
+                break
+
+            from langchain_core.messages import ToolMessage
+
+            for tool_call in response.tool_calls:
+                tool_name = tool_call["name"]
+                tool_args = tool_call["args"]
+
+                print(f"[VALIDATE_NAMES] Iteration {iteration}: Calling tool '{tool_name}'", flush=True)
+
+                matching_tool = next((t for t in tools if t.name == tool_name), None)
+                if matching_tool:
+                    try:
+                        result = await matching_tool.ainvoke(tool_args)
+                        messages.append(
+                            ToolMessage(
+                                content=str(result),
+                                tool_call_id=tool_call["id"],
+                                name=tool_name,
+                            )
+                        )
+                    except Exception as e:
+                        messages.append(
+                            ToolMessage(
+                                content=f"Error executing {tool_name}: {str(e)}",
+                                tool_call_id=tool_call["id"],
+                                name=tool_name,
+                            )
+                        )
+                else:
+                    messages.append(
+                        ToolMessage(
+                            content=f"Tool {tool_name} not found",
+                            tool_call_id=tool_call["id"],
+                            name=tool_name,
+                        )
+                    )
+
+            iteration += 1
+
+        # Return state - route to scrub phase if complete, otherwise wait for corrections
+        if validation_state.get("validation_complete", False):
+            return {
+                "current_phase": "scrub",
+                "next_step": "scrub_pii",
+                "validation_complete": validation_state["validation_complete"],
+                "messages": messages[len(state["messages"]) :],
+            }
+        else:
+            # Not done yet - wait for teacher to provide corrections
+            return {
+                "next_step": "END",
+                "current_phase": "validate",  # Stay in validate phase
+                "messages": messages[len(state["messages"]) :],
+            }
+    except Exception as e:
+        print(f"[VALIDATE_NAMES] ERROR: {type(e).__name__}: {str(e)}", flush=True)
+        import traceback
+        traceback.print_exc()
+        from langchain_core.messages import AIMessage
+        return {
+            "next_step": "END",
+            "messages": [AIMessage(content=f"I encountered an error during name validation: {str(e)}\n\nPlease check the logs for more details.")],
+        }
+
+
+# --- REFACTORED: Scrub PII Node (Phase 3b) ---
+async def scrub_pii_node(state: AgentState) -> AgentState:
+    """PII scrubbing node - removes student names from essays for privacy.
+
+    This node:
+    1. Calls scrub_processed_job to remove PII from all essays
+    2. Confirms completion
+    3. Moves to evaluation phase
+
+    This is a simple node that only runs after names are validated.
+
+    Args:
+        state: Current agent state with job_id and validated names
+
+    Returns:
+        Updated state with scrubbing_complete flag
+    """
+    try:
+        system_prompt = """You are a privacy protection coordinator. Your job is to remove student names from essays before grading.
+
+**CONTEXT:**
+- Job ID: {job_id}
+- Student names: ✓ Validated (all names confirmed correct)
+- Ready to scrub PII for privacy-protected grading
+
+**YOUR SIMPLE TASK:**
+
+**Step 1: Remove PII from Essays**
+- Call: scrub_processed_job(job_id="{job_id}")
+- The MCP server removes all student names from essay text
+- This ensures the AI grader doesn't see student identities
+- Confirm: "✓ Privacy protection complete. Student names have been scrubbed from all essays."
+
+**Step 2: Signal Completion**
+- Call: complete_scrubbing(scrubbing_complete=True)
+- This moves to the evaluation phase
+
+**TOOLS AVAILABLE:**
+- scrub_processed_job(job_id) - Remove PII from essays
+- complete_scrubbing(scrubbing_complete) - Signal completion
+
+That's it! This is a quick step before grading begins.
+"""
+
+        # Prepare context-aware prompt
+        job_id = state.get("job_id") or "Unknown"
+
+        system_prompt = system_prompt.format(job_id=job_id)
+
+        # Get MCP tools
+        from edagent.mcp_tools import get_phase_tools
+        from langchain_core.tools import tool as tool_decorator
+
+        tools = await get_phase_tools("scrub")  # Gets scrubbing tools only
+
+        # Add completion signal tool
+        scrubbing_state = {"scrubbing_complete": False}
+
+        @tool_decorator
+        def complete_scrubbing(scrubbing_complete: bool) -> str:
+            """Signal that PII scrubbing is complete.
+
+            Args:
+                scrubbing_complete: Whether scrubbing was successful
+
+            Returns:
+                Confirmation message
+            """
+            scrubbing_state["scrubbing_complete"] = scrubbing_complete
+            return "✓ Privacy protection complete. Ready to evaluate essays."
+
+        tools.append(complete_scrubbing)
+
+        llm = get_llm().bind_tools(tools)
+
+        messages = [SystemMessage(content=system_prompt)] + list(state["messages"])
+
+        # Agentic loop (should complete in 1-2 iterations)
+        max_iterations = 5
+        iteration = 0
+
+        while iteration < max_iterations:
+            response = await llm.ainvoke(messages)
+            messages.append(response)
+
+            if not response.tool_calls:
+                break
+
+            from langchain_core.messages import ToolMessage
+
+            for tool_call in response.tool_calls:
+                tool_name = tool_call["name"]
+                tool_args = tool_call["args"]
+
+                print(f"[SCRUB_PII] Iteration {iteration}: Calling tool '{tool_name}'", flush=True)
+
+                matching_tool = next((t for t in tools if t.name == tool_name), None)
+                if matching_tool:
+                    try:
+                        result = await matching_tool.ainvoke(tool_args)
+                        messages.append(
+                            ToolMessage(
+                                content=str(result),
+                                tool_call_id=tool_call["id"],
+                                name=tool_name,
+                            )
+                        )
+                    except Exception as e:
+                        messages.append(
+                            ToolMessage(
+                                content=f"Error executing {tool_name}: {str(e)}",
+                                tool_call_id=tool_call["id"],
+                                name=tool_name,
+                            )
+                        )
+                else:
+                    messages.append(
+                        ToolMessage(
+                            content=f"Tool {tool_name} not found",
+                            tool_call_id=tool_call["id"],
+                            name=tool_name,
+                        )
+                    )
+
+            iteration += 1
+
+        # Return state - route to evaluate phase if complete
+        if scrubbing_state.get("scrubbing_complete", False):
+            return {
+                "current_phase": "evaluate",
+                "next_step": "evaluate_essays",
+                "scrubbing_complete": scrubbing_state["scrubbing_complete"],
+                "messages": messages[len(state["messages"]) :],
+            }
+        else:
+            # Should not happen, but handle gracefully
+            return {
+                "next_step": "END",
+                "current_phase": "scrub",
+                "messages": messages[len(state["messages"]) :],
+            }
+    except Exception as e:
+        print(f"[SCRUB_PII] ERROR: {type(e).__name__}: {str(e)}", flush=True)
+        import traceback
+        traceback.print_exc()
+        from langchain_core.messages import AIMessage
+        return {
+            "next_step": "END",
+            "messages": [AIMessage(content=f"I encountered an error during PII scrubbing: {str(e)}\n\nPlease check the logs for more details.")],
         }
 
 
@@ -1120,7 +1548,7 @@ Always be patient: "Evaluation is running... This is the core grading step where
 
         iteration += 1
 
-    # Return state - route to next phase if complete, otherwise stay in this node
+    # Return state - route to next phase if complete, otherwise end turn
     if evaluation_state.get("evaluation_complete", False):
         return {
             "current_phase": "report",
@@ -1130,9 +1558,10 @@ Always be patient: "Evaluation is running... This is the core grading step where
             "messages": messages[len(state["messages"]) :],
         }
     else:
-        # Not done yet - route back to this node
+        # Not done yet - end turn and wait for next user message
         return {
-            "next_step": "evaluate_essays",
+            "next_step": "END",
+            "current_phase": "evaluate",  # Remember where we are
             "messages": messages[len(state["messages"]) :],
         }
 

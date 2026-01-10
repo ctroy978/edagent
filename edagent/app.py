@@ -135,7 +135,9 @@ async def on_message(message: cl.Message):
                 "router": "🔍 Understanding your request",
                 "gather_materials": "📋 Gathering materials",
                 "prepare_essays": "📄 Preparing essays for grading",
-                "inspect_and_scrub": "🔍 Inspecting and scrubbing PII",
+                "validate_student_names": "✅ Validating student names",
+                "scrub_pii": "🔒 Scrubbing PII for privacy",
+                "inspect_and_scrub": "🔍 Inspecting and scrubbing PII",  # Legacy
                 "evaluate_essays": "✍️ Evaluating essays",
                 "generate_reports": "📊 Generating reports",
                 "test_grading": "📋 Processing test grading request",

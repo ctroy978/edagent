@@ -230,7 +230,7 @@ async def get_phase_tools(phase: str) -> List[StructuredTool]:
     allowed for each phase of the essay grading workflow.
 
     Args:
-        phase: One of 'gather', 'prepare', 'inspect', 'evaluate', 'report'
+        phase: One of 'gather', 'prepare', 'validate', 'scrub', 'inspect', 'evaluate', 'report'
 
     Returns:
         Filtered list of tools for that phase only
@@ -249,6 +249,15 @@ async def get_phase_tools(phase: str) -> List[StructuredTool]:
         "prepare": [
             "batch_process_documents",    # OCR processing of essays
             # Note: prepare_files_for_grading is added separately (not from MCP)
+        ],
+        "validate": [
+            "get_job_statistics",         # Retrieve student manifest
+            "validate_student_names",     # Validate names against roster
+            "correct_detected_name",      # Fix name mismatches
+        ],
+        "scrub": [
+            "get_job_statistics",         # Retrieve student manifest (for confirmation)
+            "scrub_processed_job",        # Remove PII from essays
         ],
         "inspect": [
             "get_job_statistics",         # Retrieve student manifest
