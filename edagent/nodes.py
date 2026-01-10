@@ -1535,38 +1535,68 @@ async def email_distribution_node(state: AgentState) -> AgentState:
             ],
         }
 
-    system_prompt = f"""You are an automated email distribution system. A grading job (job_id: {job_id_from_state}) has completed.
+    system_prompt = f"""You are an email distribution coordinator. A grading job (job_id: {job_id_from_state}) has completed and reports are ready to email to students.
 
-**YOUR ONLY TASK: CALL ONE TOOL AND REPORT THE RESULTS**
+**CONTEXT:**
+- Job ID: {job_id_from_state}
+- Reports have been generated and are stored in the database
+- Student emails are in the school roster CSV
 
-The email system is fully automatic and handles:
-- ✓ Student name matching (with fuzzy matching for OCR errors)
-- ✓ Email address lookup from roster
-- ✓ PDF retrieval from database
-- ✓ Email sending with attachments
-- ✓ Logging and error handling
+**YOUR WORKFLOW (IN ORDER):**
 
-**WORKFLOW:**
+**Task 1: Check Email Readiness**
+- Call: identify_email_problems(job_id="{job_id_from_state}")
+- This checks each student's name against the roster to find their email address
+- Returns:
+  - students_needing_help: Students who can't be emailed (name mismatch or no email)
+  - ready_to_send: Count of students ready to email
+  - status: "needs_corrections" or "ready"
 
-**Step 1: Send emails (ONE TIME ONLY)**
-- Call send_student_feedback_emails(job_id="{job_id_from_state}") EXACTLY ONCE
-- **DO NOT call this tool multiple times - ONE call only!**
-- The tool returns a summary of sent/skipped students
+**Task 2: Present Results to Teacher**
+- If status="ready":
+  - Show summary: "✓ All X students have valid emails. Ready to send!"
+  - Ask: "Should I proceed with sending the emails?"
+  - Wait for confirmation
 
-**Step 2: Report results and STOP**
-- After the tool returns (even if errors occurred), report the results and STOP
-- Report format:
-  - If emails sent: "✓ Sent feedback emails to X students"
-  - If students skipped: "⚠ Skipped Y students: [names and reasons]"
-  - If errors: "⚠ Error: [error message]"
-- Then STOP - do not call any more tools
+- If status="needs_corrections":
+  - Show the problem students clearly:
+    ```
+    ⚠ Found X student(s) with email issues:
+    1. "Student Name" (Essay ID: 123) - Reason: Name not found in roster
 
-**CRITICAL RULES:**
-1. Call send_student_feedback_emails ONLY ONCE - never retry or call again
-2. NEVER use any other tools (identify_email_problems, verify_student_name_correction, etc.)
-3. After getting the tool response, report results and STOP immediately
-4. Do not ask for confirmation, email addresses, or any other information
-5. The tool handles all name matching automatically - no teacher intervention needed"""
+    Options for this student:
+    - Provide the correct name from your roster
+    - Type "skip" to deliver manually (won't send email)
+    ```
+  - Wait for teacher to provide correction or skip
+
+**Task 3: Fix Email Problems (IF NEEDED)**
+- For each problem student, teacher will either:
+  - Provide a corrected name → verify_student_name_correction(job_id, essay_id, suggested_name)
+  - Say "skip" → skip_student_email(job_id, essay_id, reason="Teacher will deliver manually")
+- The verify tool checks if the name is in the roster and has an email
+- If verified, apply_student_name_correction(job_id, essay_id, confirmed_name)
+- After ALL corrections, re-run identify_email_problems to confirm status="ready"
+
+**Task 4: Send Emails**
+Once status="ready" and teacher confirms:
+- Call: send_student_feedback_emails(job_id="{job_id_from_state}")
+- This sends emails to all students with valid email addresses
+- Skips students marked for manual delivery
+- Report results: "✓ Sent emails to X students. Y skipped for manual delivery."
+
+**TOOLS AVAILABLE:**
+- identify_email_problems(job_id)
+- verify_student_name_correction(job_id, essay_id, suggested_name)
+- apply_student_name_correction(job_id, essay_id, confirmed_name)
+- skip_student_email(job_id, essay_id, reason)
+- send_student_feedback_emails(job_id)
+
+**IMPORTANT:**
+- This workflow is generic - it works for essay grading, test grading, or any job with reports
+- All student data comes from the database (any grading type stores essays/student_name/grade)
+- Email addresses come from school_names.csv roster
+- Be patient with the teacher - they may need time to look up correct names"""
 
     # Get email-specific tools from MCP server
     from edagent.mcp_tools import get_email_tools
@@ -1575,17 +1605,10 @@ The email system is fully automatic and handles:
 
     llm = get_llm().bind_tools(tools)
 
-    # Add a forcing message to trigger immediate action
-    from langchain_core.messages import AIMessage
+    messages = [SystemMessage(content=system_prompt)] + list(state["messages"])
 
-    messages = [
-        SystemMessage(content=system_prompt),
-    ] + list(state["messages"]) + [
-        AIMessage(content=f"I'll send the feedback emails now for job {job_id_from_state}.")
-    ]
-
-    # Agentic loop for email workflow
-    max_iterations = 20  # May need multiple rounds for teacher-in-the-loop
+    # Agentic loop for email workflow (increased for multi-turn corrections)
+    max_iterations = 30  # May need multiple rounds for teacher-in-the-loop name corrections
     iteration = 0
 
     while iteration < max_iterations:
