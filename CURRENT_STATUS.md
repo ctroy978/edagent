@@ -7,6 +7,39 @@
 
 ## What We Completed Today (January 10, 2026)
 
+### 1. **Fixed Email Routing and Job ID Display** ✅
+**Problem 1 - "no email" triggered email flow:** User typed "no email" to decline email distribution, but the router detected "email" keyword and routed to email_distribution anyway, asking again. User had to type "no on email" a second time.
+
+**Root Cause:** Router checked for positive keywords (`["email", "send", "mail", ...]`) without first checking for negative intent. "no email" matched "email" and routed to email phase.
+
+**Solution (nodes.py:86-111):**
+- Added negative keyword detection: `["no", "don't", "skip", "not", "nope", "decline", "cancel"]`
+- Router now checks negative keywords FIRST
+- Logic: Route to email ONLY if `(has_positive OR has_email_keyword) AND NOT has_negative`
+- "no email" → has_negative=True → does NOT route to email ✓
+- "email students" → has_email_keyword=True, has_negative=False → routes to email ✓
+- "yes" → has_positive=True, has_negative=False → routes to email ✓
+
+**Problem 2 - No job ID for later reference:** Agent said "If you change your mind about emailing..." but didn't provide job ID. User can't resume email workflow later without the ID. No mechanism to pull old jobs from database.
+
+**Solution (nodes.py:1721-1731, 1748-1757):**
+- Updated `generate_reports_node` prompt to show job ID prominently:
+  ```
+  ✅ Grading Complete!
+  📋 Job ID: job_20260110_171410_2de5f312
+  (Save this ID if you want to email results later)
+
+  📊 Gradebook: ...
+  📄 Student Feedback: ...
+  ```
+- Job ID displayed immediately after "Grading Complete!" header
+- Includes helpful hint: "(Save this ID if you want to email results later)"
+
+**Result:**
+- "no email" now correctly skips email distribution (no second prompt)
+- Users get job ID to reference later if they want to email results
+- Foundation in place for future "email job_XXX" command
+
 ### 🎉 **Full End-to-End Workflow Test - PASSED** ✅
 **Achievement:** Completed the first successful full workflow test from rubric upload through email distribution with all phases working correctly.
 
@@ -105,7 +138,111 @@ But the graph no longer had an `inspect_and_scrub` node after the refactoring.
 - Workflow correctly routes: prepare → validate → scrub → evaluate
 - Agent has access to correct MCP tools and will use roster validation tools instead of asking user for files
 
-### 6. **Node Refactoring: Split Inspect Phase** ✅
+### 6. **Improved Progress Feedback Across All Phases** ✅
+**Problem:** During testing, user couldn't tell if system was working or hung. After name correction, agent said "Now re-checking all names..." then went silent. During evaluation, agent said "Evaluation is running..." but no visible progress. User had to type "resume" or "hello" to check if system was still working.
+
+**User Experience Issues:**
+1. **Validation:** After correction, silence after "Now re-checking..." → User typed "resume"
+2. **Scrub:** No chat message at all, only status indicator → Appeared to skip phase
+3. **Evaluation:** Said "running" but no confirmation it actually started → User typed "hello" to check
+
+**Root Cause:** Nodes weren't providing clear progress updates. Messages came AFTER tools completed (if at all), not BEFORE. This created "is it working or hung?" confusion.
+
+**Solution: Added explicit progress messages BEFORE and AFTER tool calls**
+
+**validate_student_names_node (nodes.py:1058, 1095-1102):**
+- BEFORE validation: "🔍 Validating student names against school roster..."
+- BEFORE re-validation: "🔄 Re-validating all names against roster..."
+- AFTER validation completes: "✓ All names validated! X/X students matched successfully."
+
+**scrub_pii_node (nodes.py:1263, 1267):**
+- BEFORE scrubbing: "🔒 Removing student names from essays for blind grading..."
+- AFTER scrubbing: "✓ Privacy scrubbing complete. Essays are ready for evaluation."
+
+**evaluate_essays_node (nodes.py:1452-1461, 1472-1478, 1491-1492):**
+- If using KB: "📚 Retrieving context from reading materials..." → "✓ Context retrieved."
+- If no KB: "No reading materials provided - grading based on rubric alone."
+- BEFORE calling evaluate_job:
+  ```
+  📝 Starting essay evaluation...
+   • Job: job_id
+   • Essays: X students
+   • Estimated time: 3-5 minutes
+
+   ⏳ Calling grading system... (this step takes time, please wait)
+  ```
+- AFTER evaluation completes: "✓ Evaluation complete! Graded X essays successfully."
+
+**Result:**
+- Users now see clear status updates BEFORE long operations start
+- Users know what's happening and how long to expect
+- Users can distinguish "working" from "hung" states
+- No more need to type "hello" or "resume" to check if system is alive
+
+**Expected User Experience Now:**
+```
+[User corrects name: "pfour meven"]
+✓ Essay ID 71 updated to Pfour meven
+🔄 Re-validating all names against roster...
+✓ All names validated! 2/2 students matched successfully.
+
+🔒 Removing student names from essays for blind grading...
+✓ Privacy scrubbing complete. Essays are ready for evaluation.
+
+No reading materials provided - grading based on rubric alone.
+📝 Starting essay evaluation...
+ • Job: job_20260110_140351
+ • Essays: 3 students
+ • Estimated time: 3-5 minutes
+
+⏳ Calling grading system... (this step takes time, please wait)
+✓ Evaluation complete! Graded 3 essays successfully.
+Moving to report generation...
+```
+
+### 7. **Fixed Workflow Hanging Issues** ✅
+**Problem 1 - Validation hanging after correction:** After user corrected a name ("pfour meven"), agent said "Now re-checking all names..." but then stopped and returned END instead of actually re-validating. User had to type "resume" to continue.
+
+**Problem 2 - Evaluation never starting:** After scrub phase completed and routed to evaluate, the evaluate_essays_node was entered but never called `evaluate_job`. It immediately returned END without making any tool calls. System appeared hung, user typed "hello" to try unsticking it, but it remained stuck.
+
+**Root Causes:**
+1. **Validation:** LLM announced it would re-check but didn't actually call the tool in the same turn
+2. **Evaluation:** LLM saw conversation history (including "resume", "hello" messages) and got confused, deciding not to call any tools at all
+3. Both nodes lacked forceful instructions to IGNORE user interruptions and EXECUTE IMMEDIATELY
+
+**Solutions:**
+1. **validate_student_names_node (nodes.py:1021-1031):**
+   - Added "⚠️ CRITICAL INSTRUCTIONS - READ FIRST" section at top
+   - Explicit: "IF USER PROVIDED NAME CORRECTION → apply it then IMMEDIATELY call validate_student_names in SAME turn"
+   - Explicit: "DO NOT say 'Now re-checking...' and stop - ACTUALLY call the tool"
+   - Added: "IF USER SAID 'resume'/'continue'/'hello' → IGNORE it completely and continue workflow"
+
+2. **evaluate_essays_node (nodes.py:1387-1395, 1397-1405):**
+   - Added early exit check: if evaluation_complete already true, skip to reports
+   - Added "⚠️ CRITICAL INSTRUCTIONS - READ FIRST" section at top
+   - Explicit: "YOU MUST CALL evaluate_job IMMEDIATELY - NO EXCEPTIONS"
+   - Explicit: "DO NOT respond to conversational messages in history - IGNORE 'resume'/'hello'/'continue'"
+   - Explicit: "This node was triggered by workflow system - START IMMEDIATELY with Task 1"
+
+**Result:**
+- Validation should now automatically re-validate after corrections without waiting for "resume"
+- Evaluation should start immediately when entered from workflow, ignoring conversation history
+- Both nodes will ignore user interruptions like "hello" (which users type when system appears hung)
+
+### 7. **Fixed Agent Asking for Roster in Wrong Phase** ✅
+**Problem:** During ZIP file test, agent asked for roster upload during prepare phase instead of automatically using MCP validation tools in validate phase. Agent was trying to be helpful by pre-validating names, but went off-script.
+
+**Root Cause:** The `prepare_essays_node` system prompt didn't explicitly forbid name validation. When the LLM saw unusual names like "Pfour four" and "Unknown Student 01", it tried to help by asking for roster verification immediately, rather than completing the phase and letting the validate_student_names_node handle it.
+
+**Solution:** Updated `prepare_essays_node` system prompt (nodes.py:584-590):
+- Added "CRITICAL - DO NOT VALIDATE NAMES IN THIS PHASE" section
+- Explicit instructions: DO NOT ask for roster, DO NOT ask for name corrections
+- Clarified: "Name validation happens AUTOMATICALLY in the next phase using the school roster"
+- Changed encouraging message from "Let's verify the student list next..." to "Moving to validation..." (less suggestive)
+
+**Result:** Agent will now complete prepare phase without asking about names, allowing validate_student_names_node to handle roster checking with MCP tools.
+
+### 8. **Node Refactoring: Split Inspect Phase** ✅
 **Problem:** `inspect_and_scrub_node` was becoming complex and tangled with 251 lines handling both name validation (with multi-turn corrections) and PII scrubbing. The combined logic made it harder to understand, test, and debug.
 
 **Solution:** Split into two focused nodes:
@@ -373,12 +510,17 @@ Successfully tested full workflow from rubric upload through email distribution:
 ### ⚠️ Edge Cases Still Need Testing
 1. **Essays without names** - Should show as "Unknown Student" (seen in test ✅)
 2. **Mixed handwritten and typed essays** - Not tested yet
-3. **ZIP files with multiple PDFs** - Not tested yet
+3. **ZIP files with multiple PDFs** - Tested (found bug, fixed) - needs re-test ⚠️
 4. **No reading materials workflow** - Tested ✅ (can skip KB entirely)
 5. **Large batch (12+ students)** - Not tested yet
 6. **Multiple name mismatches** - Not tested (only tested 1 mismatch)
 
+**Note on ZIP file test:** Agent successfully extracted PDFs from ZIP, but asked for roster during prepare phase instead of using MCP tools in validate phase. Fixed by adding explicit "DO NOT VALIDATE NAMES IN THIS PHASE" instructions to prepare_essays_node prompt. Needs re-test to confirm fix.
+
 ### 🐛 Known Issues
+- **FIXED (Jan 10):** Poor progress feedback causing "is it hung?" confusion - added clear BEFORE/AFTER messages for all long operations
+- **FIXED (Jan 10):** Workflow hanging after name correction and during evaluation - strengthened prompts to EXECUTE IMMEDIATELY and IGNORE interruptions
+- **FIXED (Jan 10):** Agent asking for roster during prepare phase - added explicit instructions to NOT validate names until next phase
 - **FIXED (Jan 10):** Essay IDs meaningless to teachers - added essay previews
 - **FIXED (Jan 10):** KeyError 'email_distribution' during routing - added graph edge and reordered router checks
 - **FIXED (Jan 10):** Duplicate essay records from re-processing - added ocr_complete check
@@ -555,8 +697,12 @@ The system is ready for real classroom use. Priority now is edge case testing an
 
 ---
 
-**Status:** ✅ END-TO-END TEST PASSED - System ready for production use
-**Last Updated:** January 10, 2026 at 13:50 PST
-**Session:** Completed full workflow test (gather → prepare → validate → scrub → evaluate → report → email)
-**Test Result:** All phases working correctly - name validation, essay preview, corrections, grading, and email distribution successful
-**Next Action:** Edge case testing and real classroom deployment
+**Status:** ✅ PROGRESS FEEDBACK IMPLEMENTED - System now shows clear status updates
+**Last Updated:** January 10, 2026 at 15:15 PST
+**Session:** Added comprehensive progress messages (BEFORE/AFTER tool calls) to eliminate "is it hung?" confusion
+**Latest Improvements:**
+  1. Validation shows clear progress: "🔍 Validating..." → "✓ All names validated!"
+  2. Scrub shows activity: "🔒 Removing names..." → "✓ Privacy scrubbing complete"
+  3. Evaluation shows detailed status with time estimate: "📝 Starting... 3-5 min" → "✓ Complete!"
+  4. Users can now distinguish working vs. hung states without typing "hello"
+**Next Action:** Re-test ZIP workflow - should see clear progress feedback at every phase

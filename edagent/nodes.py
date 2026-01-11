@@ -82,16 +82,33 @@ async def router_node(state: AgentState) -> AgentState:
 
     # Check for email distribution intent FIRST (before phase routing)
     # This allows users to confirm email after grading completes
-    email_keywords = ["email", "send", "distribute", "mail", "yes", "yeah", "yep", "sure", "ok", "okay"]
 
-    if job_id and current_phase == "report" and any(keyword in last_message for keyword in email_keywords):
-        # User has a completed grading job and is confirming email distribution
-        print(f"[ROUTER DEBUG] Routing to email_distribution with job_id: {job_id}")
-        return {
-            "next_step": "email_distribution",
-            "job_id": job_id,  # CRITICAL: Pass through the job_id
-            "messages": [AIMessage(content=f"Great! Let me help you distribute these via email. (Using job_id: {job_id})")],
-        }
+    # FIRST: Check for negative responses (user declining email)
+    negative_keywords = ["no", "don't", "dont", "skip", "not", "nope", "nah", "decline", "cancel"]
+
+    # THEN: Check for positive email intent
+    email_keywords = ["email", "send", "distribute", "mail"]
+    positive_keywords = ["yes", "yeah", "yep", "sure", "ok", "okay"]
+
+    # If user says "no email" or similar, DON'T route to email
+    if job_id and current_phase == "report":
+        has_negative = any(neg in last_message for neg in negative_keywords)
+        has_email_keyword = any(keyword in last_message for keyword in email_keywords)
+        has_positive = any(keyword in last_message for keyword in positive_keywords)
+
+        # Route to email ONLY if:
+        # - User has positive confirmation (yes/send/etc.) OR
+        # - User mentions email WITHOUT a negative
+        should_email = (has_positive or has_email_keyword) and not has_negative
+
+        if should_email:
+            # User has a completed grading job and is confirming email distribution
+            print(f"[ROUTER DEBUG] Routing to email_distribution with job_id: {job_id}")
+            return {
+                "next_step": "email_distribution",
+                "job_id": job_id,  # CRITICAL: Pass through the job_id
+                "messages": [AIMessage(content=f"Great! Let me help you distribute these via email. (Using job_id: {job_id})")],
+            }
 
     # Check if we're continuing a workflow (phase in progress)
     phase_routing = {
@@ -581,6 +598,14 @@ You will see: "[User attached files: /path1, /path2...]" in the message
 - Call: complete_preparation(job_id="{job_id}", clean_directory_path=<path>)
 - This signals you're ready to move to inspection phase
 
+**CRITICAL - DO NOT VALIDATE NAMES IN THIS PHASE:**
+- DO NOT ask the teacher to upload a roster or class list
+- DO NOT ask for student name corrections
+- DO NOT ask the teacher to verify the detected names
+- Name validation happens AUTOMATICALLY in the next phase using the school roster
+- Your ONLY job is to process the essays and signal completion
+- Even if you see "Unknown Student" or unusual names - DO NOT mention it, validation happens next
+
 **CRITICAL ERROR HANDLING:**
 If ANY tool fails:
 1. STOP immediately
@@ -595,7 +620,7 @@ If ANY tool fails:
 - batch_process_documents(directory_path, job_id) - MCP tool to extract text
 - complete_preparation(job_id, clean_directory_path) - Signal completion
 
-Always be encouraging: "Great! Essays are processed. Let's verify the student list next..."
+Always be brief: "✓ Essays processed successfully! Moving to validation..."
 """
 
         # Prepare context-aware prompt with job_id
@@ -1010,7 +1035,19 @@ async def validate_student_names_node(state: AgentState) -> AgentState:
         Updated state with validation_complete flag
     """
     try:
-        system_prompt = """You are a student name validation coordinator. Your job is to verify all detected student names against the school roster.
+        system_prompt = """⚠️ CRITICAL INSTRUCTIONS - READ FIRST ⚠️
+
+**IF USER PROVIDED A NAME CORRECTION:**
+- Apply it immediately with correct_detected_name
+- Then IMMEDIATELY call validate_student_names in the SAME turn to re-check
+- DO NOT say "Now re-checking..." and stop - ACTUALLY call the tool
+
+**IF USER SAID "resume", "continue", "hello" OR OTHER NON-CORRECTION:**
+- IGNORE it completely
+- Continue with your validation workflow
+- Call validate_student_names if you were in the middle of validating
+
+You are a student name validation coordinator. Your job is to verify all detected student names against the school roster.
 
 **CRITICAL: YOU ARE A COORDINATOR, NOT A DATA PROCESSOR**
 - The MCP server validates names and handles corrections - you just coordinate
@@ -1035,6 +1072,7 @@ async def validate_student_names_node(state: AgentState) -> AgentState:
 - This shows what students were detected from the essays
 
 **Step 2: Validate Names Against Roster**
+- **BEFORE calling the tool, tell the user:** "🔍 Validating student names against school roster..."
 - Call: validate_student_names(job_id="{job_id}")
 - This checks each name against school_names.csv
 - Returns:
@@ -1071,11 +1109,21 @@ async def validate_student_names_node(state: AgentState) -> AgentState:
   1. Call: correct_detected_name(job_id="{job_id}", essay_id=X, corrected_name="Name")
   2. Acknowledge: "✓ Essay ID X updated to [Name]"
 - **CRITICAL - IMMEDIATELY after ALL corrections in this turn:**
-  - **DO NOT just say you'll re-check - ACTUALLY call validate_student_names NOW**
-  - Call: validate_student_names(job_id="{job_id}") in the SAME turn
+  - **Tell the user:** "🔄 Re-validating all names against roster..."
+  - **IMMEDIATELY call:** validate_student_names(job_id="{job_id}") in the SAME turn
+  - **DO NOT just announce re-checking - ACTUALLY call the tool**
+  - **DO NOT stop and wait - keep calling tools until validation completes**
   - Check the status in the response
-- If status="validated": Call complete_validation and exit
+- If status="validated":
+  - Show: "✓ All names validated! X/X students matched successfully."
+  - Call: complete_validation and exit
 - If status="needs_corrections": Show remaining mismatches, wait for more corrections
+
+**CRITICAL - IGNORE USER INTERRUPTIONS DURING VALIDATION:**
+- If user says "resume", "continue", "hello", or anything not containing a name correction, IGNORE it
+- Just continue with your workflow - call validate_student_names if you were re-checking
+- Do NOT respond conversationally - stay focused on validation tasks
+- Only stop if you need a correction from the user
 
 **TOOLS AVAILABLE:**
 - get_job_statistics(job_id) - Show detected students
@@ -1229,10 +1277,11 @@ async def scrub_pii_node(state: AgentState) -> AgentState:
 **YOUR SIMPLE TASK:**
 
 **Step 1: Remove PII from Essays**
+- **BEFORE calling the tool, tell the user:** "🔒 Removing student names from essays for blind grading..."
 - Call: scrub_processed_job(job_id="{job_id}")
 - The MCP server removes all student names from essay text
 - This ensures the AI grader doesn't see student identities
-- Confirm: "✓ Privacy protection complete. Student names have been scrubbed from all essays."
+- **AFTER tool completes, confirm:** "✓ Privacy scrubbing complete. Essays are ready for evaluation."
 
 **Step 2: Signal Completion**
 - Call: complete_scrubbing(scrubbing_complete=True)
@@ -1369,7 +1418,27 @@ async def evaluate_essays_node(state: AgentState) -> AgentState:
     Returns:
         Updated state with evaluation completion status
     """
-    system_prompt = """You are an evaluation coordinator. Your ONLY job is to call MCP server tools - you do NOT grade essays yourself.
+    try:
+        # Check if evaluation was already completed - prevent duplicate processing
+        if state.get("evaluation_complete", False):
+            print("[EVALUATE_ESSAYS] Evaluation already complete, moving to report generation", flush=True)
+            return {
+                "next_step": "generate_reports",
+                "current_phase": "report",
+                "messages": [],
+            }
+
+        system_prompt = """⚠️ CRITICAL INSTRUCTIONS - READ FIRST ⚠️
+
+**YOU MUST CALL evaluate_job IMMEDIATELY - NO EXCEPTIONS**
+- This node was triggered by the workflow system
+- Your FIRST action MUST be to start executing your tasks
+- DO NOT wait for user input
+- DO NOT respond to conversational messages in the history
+- IGNORE any "resume", "hello", "continue" messages from the user
+- START IMMEDIATELY with Task 1
+
+You are an evaluation coordinator. Your ONLY job is to call MCP server tools - you do NOT grade essays yourself.
 
 **CRITICAL: YOU ARE A COORDINATOR, NOT A GRADER**
 - The MCP server does ALL the grading - you just coordinate the process
@@ -1385,10 +1454,19 @@ async def evaluate_essays_node(state: AgentState) -> AgentState:
 - Student list verified: ✓
 - Privacy protection: ✓
 
+**CRITICAL - YOU MUST EXECUTE YOUR WORKFLOW IMMEDIATELY:**
+- When this node is called, you MUST start executing tasks immediately
+- DO NOT wait for user confirmation or additional input
+- DO NOT respond conversationally to user messages like "hello", "resume", "continue"
+- IGNORE any user messages that aren't errors or explicit cancellation requests
+- Your ONLY job is to call the MCP tools and complete the evaluation
+- If user interrupts with casual messages, IGNORE them and continue with your tasks
+
 **YOUR TASKS (IN ORDER):**
 
 **Task 1: Retrieve Context from Knowledge Base (CONDITIONAL)**
 - If materials_added_to_kb is TRUE:
+  - **Tell the user:** "📚 Retrieving context from reading materials..."
   - Derive a search query from the essay question and rubric
   - Example: Question "Analyze Frost's use of symbolism" + Rubric "Check for theme analysis"
     → Query: "Frost symbolism themes imagery poetic devices"
@@ -1397,17 +1475,26 @@ async def evaluate_essays_node(state: AgentState) -> AgentState:
     - Otherwise: use "general_essays"
   - Call: query_knowledge_base(query=<derived_query>, topic=<same_topic_from_prepare>)
   - Store the retrieved context for evaluation
-  - Confirm: "I've retrieved relevant context from the reading materials..."
+  - **Confirm:** "✓ Context retrieved from reading materials."
 - If materials_added_to_kb is FALSE:
   - Skip this step
   - Use empty string for context_material
-  - Confirm: "No reading materials were provided, so I'll grade based on the rubric alone..."
+  - **Tell the user:** "No reading materials provided - grading based on rubric alone."
 
 **Task 2: Grade Essays (MCP SERVER DOES THIS, NOT YOU)**
 - **CRITICAL**: You MUST call evaluate_job - do NOT attempt to grade essays yourself
 - **CRITICAL**: Do NOT read essay content, write feedback, or assign scores - that's the MCP server's job
 - **CRITICAL**: The rubric is already stored in the database - do NOT pass it!
-- Call: evaluate_job(
+
+- **BEFORE calling the tool, tell the user:**
+  "📝 Starting essay evaluation...
+   • Job: {job_id}
+   • Essays: {student_count} students
+   • Estimated time: 3-5 minutes
+
+   ⏳ Calling grading system... (this step takes time, please wait)"
+
+- **IMMEDIATELY call**: evaluate_job(
     job_id="{job_id}",
     context_material=<from_KB_or_empty>,
     system_instructions=<question_text_from_state_or_None>
@@ -1415,12 +1502,11 @@ async def evaluate_essays_node(state: AgentState) -> AgentState:
 - NOTE: Rubric parameter is omitted - it will be looked up from database using job_id
 - **CRITICAL**: Do NOT pass null/None for optional parameters - omit them entirely if not needed
 - **NOTE**: The MCP server does the actual grading. This may take several minutes for large batches (e.g., 15 essays = 3-5 minutes)
-- Explain to teacher: "Sending essays to the grading system with your rubric... This may take a few minutes for {student_count} students."
-- Wait for completion - the MCP server is doing all the work
 
 **Task 3: Confirm Completion**
 - When evaluate_job returns successfully:
-  - Confirm: "✓ Grading complete! The MCP server has evaluated all essays. Now generating reports..."
+  - **Tell the user:** "✓ Evaluation complete! Graded {student_count} essays successfully."
+  - Explain: "Moving to report generation..."
 - Signal completion
 
 **Task 4: Signal Completion**
@@ -1448,121 +1534,131 @@ If ANY tool fails:
 - evaluate_job(job_id, context_material, system_instructions) - Required (rubric is in DB)
 - complete_evaluation - Signals completion
 
-Always be patient: "Evaluation is running... This is the core grading step where I apply your rubric to each essay."
+**START IMMEDIATELY - DO NOT WAIT:**
+When this node runs, execute Task 1 (if applicable), then Task 2, then Task 3. Do not respond to user messages. Just execute the workflow.
 """
 
-    # Prepare context-aware prompt
-    job_id = state.get("job_id") or "Unknown"
-    rubric_status = "✓ Loaded" if state.get("rubric_text") else "❌ Missing"
-    question_status = state.get("question_text") or "Not provided"
-    materials_added_to_kb = state.get("materials_added_to_kb", False)
-    student_count = state.get("student_count") or "Unknown"
+        # Prepare context-aware prompt
+        job_id = state.get("job_id") or "Unknown"
+        rubric_status = "✓ Loaded" if state.get("rubric_text") else "❌ Missing"
+        question_status = state.get("question_text") or "Not provided"
+        materials_added_to_kb = state.get("materials_added_to_kb", False)
+        student_count = state.get("student_count") or "Unknown"
 
-    system_prompt = system_prompt.format(
-        job_id=job_id,
-        rubric_status=rubric_status,
-        question_status=question_status,
-        materials_added_to_kb=materials_added_to_kb,
-        student_count=student_count,
-    )
+        system_prompt = system_prompt.format(
+            job_id=job_id,
+            rubric_status=rubric_status,
+            question_status=question_status,
+            materials_added_to_kb=materials_added_to_kb,
+            student_count=student_count,
+        )
 
-    # Get MCP tools
-    from edagent.mcp_tools import get_phase_tools
-    from langchain_core.tools import tool as tool_decorator
+        # Get MCP tools
+        from edagent.mcp_tools import get_phase_tools
+        from langchain_core.tools import tool as tool_decorator
 
-    tools = await get_phase_tools("evaluate")
+        tools = await get_phase_tools("evaluate")
 
-    # Add completion signal tool
-    evaluation_state = {
-        "evaluation_complete": False,
-        "context_material": "",
-    }
-
-    @tool_decorator
-    def complete_evaluation(evaluation_complete: bool, context_material: str) -> str:
-        """Signal that evaluation is complete.
-
-        Args:
-            evaluation_complete: Whether evaluation was successful
-            context_material: Retrieved context from knowledge base (or empty string)
-
-        Returns:
-            Confirmation message
-        """
-        evaluation_state["evaluation_complete"] = evaluation_complete
-        evaluation_state["context_material"] = context_material
-        return "✓ Evaluation complete. All essays have been graded. Ready to generate reports."
-
-    tools.append(complete_evaluation)
-
-    llm = get_llm().bind_tools(tools)
-
-    messages = [SystemMessage(content=system_prompt)] + list(state["messages"])
-
-    # Agentic loop
-    max_iterations = 10
-    iteration = 0
-
-    while iteration < max_iterations:
-        response = await llm.ainvoke(messages)
-        messages.append(response)
-
-        if not response.tool_calls:
-            break
-
-        from langchain_core.messages import ToolMessage
-
-        for tool_call in response.tool_calls:
-            tool_name = tool_call["name"]
-            tool_args = tool_call["args"]
-
-            print(f"[EVALUATE_ESSAYS] Iteration {iteration}: Calling tool '{tool_name}'", flush=True)
-
-            matching_tool = next((t for t in tools if t.name == tool_name), None)
-            if matching_tool:
-                try:
-                    result = await matching_tool.ainvoke(tool_args)
-                    messages.append(
-                        ToolMessage(
-                            content=str(result),
-                            tool_call_id=tool_call["id"],
-                            name=tool_name,
-                        )
-                    )
-                except Exception as e:
-                    messages.append(
-                        ToolMessage(
-                            content=f"Error executing {tool_name}: {str(e)}",
-                            tool_call_id=tool_call["id"],
-                            name=tool_name,
-                        )
-                    )
-            else:
-                messages.append(
-                    ToolMessage(
-                        content=f"Tool {tool_name} not found",
-                        tool_call_id=tool_call["id"],
-                        name=tool_name,
-                    )
-                )
-
-        iteration += 1
-
-    # Return state - route to next phase if complete, otherwise end turn
-    if evaluation_state.get("evaluation_complete", False):
-        return {
-            "current_phase": "report",
-            "next_step": "generate_reports",
-            "evaluation_complete": evaluation_state["evaluation_complete"],
-            "context_material": evaluation_state["context_material"],
-            "messages": messages[len(state["messages"]) :],
+        # Add completion signal tool
+        evaluation_state = {
+            "evaluation_complete": False,
+            "context_material": "",
         }
-    else:
-        # Not done yet - end turn and wait for next user message
+
+        @tool_decorator
+        def complete_evaluation(evaluation_complete: bool, context_material: str) -> str:
+            """Signal that evaluation is complete.
+
+            Args:
+                evaluation_complete: Whether evaluation was successful
+                context_material: Retrieved context from knowledge base (or empty string)
+
+            Returns:
+                Confirmation message
+            """
+            evaluation_state["evaluation_complete"] = evaluation_complete
+            evaluation_state["context_material"] = context_material
+            return "✓ Evaluation complete. All essays have been graded. Ready to generate reports."
+
+        tools.append(complete_evaluation)
+
+        llm = get_llm().bind_tools(tools)
+
+        messages = [SystemMessage(content=system_prompt)] + list(state["messages"])
+
+        # Agentic loop
+        max_iterations = 10
+        iteration = 0
+
+        while iteration < max_iterations:
+            response = await llm.ainvoke(messages)
+            messages.append(response)
+
+            if not response.tool_calls:
+                break
+
+            from langchain_core.messages import ToolMessage
+
+            for tool_call in response.tool_calls:
+                tool_name = tool_call["name"]
+                tool_args = tool_call["args"]
+
+                print(f"[EVALUATE_ESSAYS] Iteration {iteration}: Calling tool '{tool_name}'", flush=True)
+
+                matching_tool = next((t for t in tools if t.name == tool_name), None)
+                if matching_tool:
+                    try:
+                        result = await matching_tool.ainvoke(tool_args)
+                        messages.append(
+                            ToolMessage(
+                                content=str(result),
+                                tool_call_id=tool_call["id"],
+                                name=tool_name,
+                            )
+                        )
+                    except Exception as e:
+                        messages.append(
+                            ToolMessage(
+                                content=f"Error executing {tool_name}: {str(e)}",
+                                tool_call_id=tool_call["id"],
+                                name=tool_name,
+                            )
+                        )
+                else:
+                    messages.append(
+                        ToolMessage(
+                            content=f"Tool {tool_name} not found",
+                            tool_call_id=tool_call["id"],
+                            name=tool_name,
+                        )
+                    )
+
+            iteration += 1
+
+        # Return state - route to next phase if complete, otherwise end turn
+        if evaluation_state.get("evaluation_complete", False):
+            return {
+                "current_phase": "report",
+                "next_step": "generate_reports",
+                "evaluation_complete": evaluation_state["evaluation_complete"],
+                "context_material": evaluation_state["context_material"],
+                "messages": messages[len(state["messages"]) :],
+            }
+        else:
+            # Not done yet - end turn and wait for next user message
+            return {
+                "next_step": "END",
+                "current_phase": "evaluate",  # Remember where we are
+                "messages": messages[len(state["messages"]) :],
+            }
+    except Exception as e:
+        print(f"[EVALUATE_ESSAYS] ERROR: {type(e).__name__}: {str(e)}", flush=True)
+        import traceback
+        traceback.print_exc()
+        from langchain_core.messages import AIMessage
         return {
             "next_step": "END",
-            "current_phase": "evaluate",  # Remember where we are
-            "messages": messages[len(state["messages"]) :],
+            "messages": [AIMessage(content=f"I encountered an error during evaluation: {str(e)}\n\nPlease check the logs for more details.")],
         }
 
 
@@ -1622,12 +1718,13 @@ async def generate_reports_node(state: AgentState) -> AgentState:
 - **IMPORTANT**: Use these LOCAL paths in your response to teacher
 
 **Task 4: Present Results to Teacher**
-- Show the download links in this EXACT format:
+- Show the download links in this EXACT format (including job ID):
   ```
-  Your grading is complete! Here are your results:
+  ✅ Grading Complete!
+  📋 Job ID: {job_id}
+  (Save this ID if you want to email results later)
 
   📊 Gradebook: [gradebook_path from download_reports_locally]
-
   📄 Student Feedback: [feedback_zip_path from download_reports_locally]
 
   Both files are ready for download using the download buttons above.
@@ -1648,8 +1745,15 @@ async def generate_reports_node(state: AgentState) -> AgentState:
 
 **EXAMPLE - Your response must include BOTH:**
 ```
-"Your grading is complete! Here are your results:
-[download links]
+"✅ Grading Complete!
+📋 Job ID: {job_id}
+(Save this ID if you want to email results later)
+
+📊 Gradebook: /tmp/edagent_downloads/job_XXX/gradebook.csv
+📄 Student Feedback: /tmp/edagent_downloads/job_XXX/feedback.zip
+
+Both files are ready for download using the download buttons above.
+
 Would you like me to email these feedback reports to your students?"
 
 AND tool_calls: [complete_grading_workflow(job_id="{job_id}", route_to_email=False)]
