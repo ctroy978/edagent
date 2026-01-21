@@ -74,12 +74,6 @@ async def router_node(state: AgentState) -> AgentState:
     current_phase = state.get("current_phase")
     last_message = state["messages"][-1].content.lower() if state["messages"] else ""
 
-    # DEBUG: Print state info
-    print(f"[ROUTER DEBUG] job_id in state: {job_id}")
-    print(f"[ROUTER DEBUG] current_phase in state: {current_phase}")
-    print(f"[ROUTER DEBUG] last_message: {last_message}")
-    print(f"[ROUTER DEBUG] full state keys: {state.keys()}")
-
     # Check for email distribution intent FIRST (before phase routing)
     # This allows users to confirm email after grading completes
 
@@ -103,7 +97,6 @@ async def router_node(state: AgentState) -> AgentState:
 
         if should_email:
             # User has a completed grading job and is confirming email distribution
-            print(f"[ROUTER DEBUG] Routing to email_distribution with job_id: {job_id}")
             return {
                 "next_step": "email_distribution",
                 "job_id": job_id,  # CRITICAL: Pass through the job_id
@@ -124,13 +117,10 @@ async def router_node(state: AgentState) -> AgentState:
     if current_phase and current_phase in phase_routing:
         # Continue the workflow at the current phase
         next_node = phase_routing[current_phase]
-        print(f"[ROUTER DEBUG] Continuing workflow at phase: {current_phase} → {next_node}")
         return {
             "next_step": next_node,
             "messages": [],  # Don't add routing message, let the phase node handle it
         }
-
-    print(f"[ROUTER DEBUG] Not routing to email - proceeding to LLM decision")
 
     system_prompt = """You are a helpful educational assistant and concierge. Your role is to understand what the user needs and route them to the appropriate specialist.
 
@@ -2049,11 +2039,6 @@ async def email_distribution_node(state: AgentState) -> AgentState:
     """
     # Extract job_id from state
     job_id_from_state = state.get("job_id")
-
-    # DEBUG: Print what email node receives
-    print(f"[EMAIL NODE DEBUG] Received state keys: {state.keys()}")
-    print(f"[EMAIL NODE DEBUG] job_id from state: {job_id_from_state}")
-    print(f"[EMAIL NODE DEBUG] Full state: {dict(state)}")
 
     # Safety check: ensure we have a job_id
     if not job_id_from_state:
